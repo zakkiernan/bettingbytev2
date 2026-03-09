@@ -9,3 +9,4 @@ nba_api
 passlib[bcrypt]
 python-jose[cryptography]
 apscheduler
+alembic

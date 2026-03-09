@@ -1,13 +1,27 @@
-import httpx
+from __future__ import annotations
+
+import logging
+import os
+import re
 import time
-from datetime import datetime
-from ingestion.nba_client import get_todays_games, get_player_id_map
+import unicodedata
+from datetime import date, datetime, timedelta
+from typing import Any
+
+import httpx
+
+from ingestion.nba_client import get_player_id_map, get_todays_games_bundle
+
+logger = logging.getLogger(__name__)
 
 FANDUEL_COMPETITION_URL = "https://api.sportsbook.fanduel.com/sbapi/competition-page"
 FANDUEL_EVENT_URL = "https://api.sportsbook.fanduel.com/sbapi/event-page"
-FANDUEL_AK = "FhMFpcPWXMeyZxOx"
-FANDUEL_COMPETITION_ID = 10547864
-FANDUEL_EVENT_TYPE_ID = 7522
+FANDUEL_AK = os.getenv("FANDUEL_AK", "FhMFpcPWXMeyZxOx")
+FANDUEL_COMPETITION_ID = int(os.getenv("FANDUEL_COMPETITION_ID", "10547864"))
+FANDUEL_EVENT_TYPE_ID = int(os.getenv("FANDUEL_EVENT_TYPE_ID", "7522"))
+FANDUEL_REGION = os.getenv("FANDUEL_REGION", "NY")
+FANDUEL_REQUEST_TIMEOUT = int(os.getenv("FANDUEL_REQUEST_TIMEOUT", "20"))
+FANDUEL_RATE_LIMIT_DELAY = float(os.getenv("FANDUEL_RATE_LIMIT_DELAY", "0.5"))
 
 HEADERS = {
     "User-Agent": (
@@ -19,7 +33,7 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
     "Origin": "https://sportsbook.fanduel.com",
     "Referer": "https://sportsbook.fanduel.com/",
-    "x-sportsbook-region": "NY",
+    "x-sportsbook-region": FANDUEL_REGION,
 }
 
 PROP_TABS = {
@@ -38,13 +52,86 @@ STAT_TYPE_MAP = {
     "Three Pointers": "threes",
 }
 
-def fetch_nba_events():
-    """
-    Step 1 - Get today's NBA event IDs and names from FanDuel.
-    Returns list of {eventId, name} dicts.
-    """
+PLAYER_NAME_ALIASES = {
+    "carlton carrington": "Bub Carrington",
+    "cam johnson": "Cameron Johnson",
+}
+
+
+def _sleep_for_rate_limit() -> None:
+    if FANDUEL_RATE_LIMIT_DELAY > 0:
+        time.sleep(FANDUEL_RATE_LIMIT_DELAY)
+
+
+def _normalize_text(value: str) -> str:
+    stripped = "".join(
+        char for char in unicodedata.normalize("NFD", value) if unicodedata.category(char) != "Mn"
+    )
+    stripped = stripped.lower().replace("'", "").replace(".", "")
+    stripped = re.sub(r"[^a-z0-9]+", " ", stripped)
+    return re.sub(r"\s+", " ", stripped).strip()
+
+
+def _payload(payload_type: str, payload: Any, external_id: str | None = None, context: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "source": "fanduel",
+        "payload_type": payload_type,
+        "external_id": external_id,
+        "context": context or {},
+        "payload": payload,
+        "captured_at": datetime.utcnow(),
+    }
+
+
+def _team_aliases(game: dict[str, Any], side: str) -> set[str]:
+    team_id_key = f"{side}_team_id"
+    abbreviation_key = f"{side}_team_abbreviation"
+    aliases = {_normalize_text(str(game.get(team_id_key, ""))), _normalize_text(str(game.get(abbreviation_key, "")))}
+    if game.get(side + "_team_name"):
+        full_name = _normalize_text(game[side + "_team_name"])
+        aliases.add(full_name)
+        words = full_name.split()
+        if words:
+            aliases.add(words[-1])
+        if len(words) > 1:
+            aliases.add(" ".join(words[-2:]))
+    return {alias for alias in aliases if alias and not alias.isdigit()}
+
+
+def _match_event_to_game(event_name: str, game: dict[str, Any]) -> bool:
+    normalized_event_name = _normalize_text(event_name)
+    home_aliases = _team_aliases(game, "home")
+    away_aliases = _team_aliases(game, "away")
+    return any(alias in normalized_event_name for alias in home_aliases) and any(alias in normalized_event_name for alias in away_aliases)
+
+
+def _resolve_player_identity(player_name: str, player_id_map: dict[str, str]) -> tuple[str | None, str]:
+    exact_match = player_id_map.get(player_name)
+    if exact_match:
+        return exact_match, player_name
+
+    normalized_player_name = _normalize_text(player_name)
+    alias_name = PLAYER_NAME_ALIASES.get(normalized_player_name)
+    if alias_name:
+        alias_match = player_id_map.get(alias_name)
+        if alias_match:
+            return alias_match, alias_name
+
+    for candidate_name, candidate_id in player_id_map.items():
+        if _normalize_text(candidate_name) == normalized_player_name:
+            return candidate_id, candidate_name
+
+    for candidate_name, candidate_id in player_id_map.items():
+        normalized_candidate = _normalize_text(candidate_name)
+        if normalized_player_name in normalized_candidate or normalized_candidate in normalized_player_name:
+            return candidate_id, candidate_name
+
+    return None, player_name
+
+
+def fetch_nba_events(client: httpx.Client) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     try:
-        response = httpx.get(
+        response = client.get(
             FANDUEL_COMPETITION_URL,
             params={
                 "_ak": FANDUEL_AK,
@@ -52,92 +139,75 @@ def fetch_nba_events():
                 "competitionId": str(FANDUEL_COMPETITION_ID),
                 "tabId": "SCHEDULE",
             },
-            headers=HEADERS,
-            timeout=20
         )
         response.raise_for_status()
+        _sleep_for_rate_limit()
         data = response.json()
 
-        events = data.get('attachments', {}).get('events', {})
-        result = []
-        for event_id, event in events.items():
-            result.append({
-                'eventId': event['eventId'],
-                'name': event.get('name', '').lower()
-            })
+        events = data.get("attachments", {}).get("events", {})
+        parsed = [
+            {
+                "event_id": str(event["eventId"]),
+                "event_name": event.get("name", ""),
+            }
+            for event in events.values()
+        ]
+        payloads = [_payload("competition_schedule", data)]
+        return parsed, payloads
+    except Exception:
+        logger.exception("Failed to fetch FanDuel NBA events")
+        return [], []
 
-        print(f"Found {len(result)} NBA events on FanDuel")
-        return result
 
-    except Exception as e:
-        print(f"Error fetching NBA events: {e}")
-        return []
-
-def fetch_event_props(event_id, stat_key):
-    """
-    Step 2 - Get prop markets for one game and one stat type.
-    """
+def fetch_event_props(client: httpx.Client, event_id: str, stat_key: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     tab = PROP_TABS.get(stat_key)
     if not tab:
-        return None
+        return None, []
 
     try:
-        response = httpx.get(
+        response = client.get(
             FANDUEL_EVENT_URL,
             params={
                 "_ak": FANDUEL_AK,
-                "eventId": str(event_id),
+                "eventId": event_id,
                 "tab": tab,
             },
-            headers=HEADERS,
-            timeout=20
         )
         response.raise_for_status()
-        return response.json()
+        _sleep_for_rate_limit()
+        data = response.json()
+        return data, [_payload("event_page", data, external_id=event_id, context={"tab": tab, "stat_key": stat_key})]
+    except Exception:
+        logger.exception("Failed to fetch FanDuel props for event %s stat %s", event_id, stat_key)
+        return None, []
 
-    except Exception as e:
-        print(f"Error fetching props for event {event_id} stat {stat_key}: {e}")
-        return None
 
-def build_game_id_map(fd_events):
-    """
-    Builds a lookup of {fanduel_event_id: nba_game_id}.
-    Matches FanDuel event names against NBA schedule by team names.
-    """
-    todays_games = get_todays_games()
-    game_id_map = {}
+def build_event_mappings(fd_events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    today_games, _ = get_todays_games_bundle()
+    tomorrow_games, _ = get_todays_games_bundle(date.today() + timedelta(days=1))
+    all_games = today_games + tomorrow_games
 
-def build_game_id_map(fd_events):
-    from datetime import date, timedelta
-    from ingestion.nba_client import get_todays_games
+    event_mappings: list[dict[str, Any]] = []
+    for event in fd_events:
+        matched_game = next((game for game in all_games if _match_event_to_game(event["event_name"], game)), None)
+        event_mappings.append(
+            {
+                "sportsbook": "fanduel",
+                "event_id": event["event_id"],
+                "event_name": event["event_name"],
+                "nba_game_id": matched_game["game_id"] if matched_game else None,
+                "captured_at": datetime.utcnow(),
+            }
+        )
+    return event_mappings
 
-    # FanDuel often shows tomorrow's games in the evening
-    # so check both today and tomorrow
-    todays_games = get_todays_games()
-    tomorrows_games = get_todays_games(date.today() + timedelta(days=1))
-    all_games = todays_games + tomorrows_games
 
-    game_id_map = {}
-    for game in all_games:
-        home = game['home_team_name'].lower().split()[-1]
-        away = game['away_team_name'].lower().split()[-1]
-        for event in fd_events:
-            event_name = event['name'].lower()
-            if home in event_name and away in event_name:
-                game_id_map[event['eventId']] = game['game_id']
-                break
-
-    return game_id_map
-
-def parse_event_props(event_id, raw_data, stat_key, game_id_map, player_id_map):
-    """
-    Parses raw event-page JSON for one game and one stat type.
-    Returns list of clean prop records.
-    """
-    if not raw_data:
-        return []
-
-    props = []
+def parse_event_props(
+    event_mapping: dict[str, Any],
+    raw_data: dict[str, Any],
+    player_id_map: dict[str, str],
+) -> list[dict[str, Any]]:
+    props: list[dict[str, Any]] = []
     captured_at = datetime.utcnow()
     markets = raw_data.get("attachments", {}).get("markets", {})
 
@@ -156,18 +226,13 @@ def parse_event_props(event_id, raw_data, stat_key, game_id_map, player_id_map):
         if not stat_type:
             continue
 
+        line = None
         over_odds = None
         under_odds = None
-        line = None
-
         for runner in market.get("runners") or []:
             result_type = (runner.get("result") or {}).get("type", "").upper()
             handicap = runner.get("handicap")
-            american_odds = (
-                runner.get("winRunnerOdds", {})
-                .get("americanDisplayOdds", {})
-                .get("americanOddsInt")
-            )
+            american_odds = runner.get("winRunnerOdds", {}).get("americanDisplayOdds", {}).get("americanOddsInt")
             if handicap is not None:
                 line = float(handicap)
             if result_type == "OVER":
@@ -175,70 +240,65 @@ def parse_event_props(event_id, raw_data, stat_key, game_id_map, player_id_map):
             elif result_type == "UNDER":
                 under_odds = american_odds
 
-        if not all([line, over_odds, under_odds]):
+        if line is None or over_odds is None or under_odds is None:
             continue
 
-        # Map player name to NBA player ID
-        player_id = player_id_map.get(player_name)
+        player_id, canonical_player_name = _resolve_player_identity(player_name, player_id_map)
         if not player_id:
-            for nba_name, pid in player_id_map.items():
-                if player_name.lower() in nba_name.lower() or nba_name.lower() in player_name.lower():
-                    player_id = pid
-                    player_name = nba_name
-                    break
-
-        if not player_id:
-            print(f"Could not map player: {player_name}")
+            logger.warning("Could not map FanDuel player name '%s'", player_name)
             continue
 
-        # Map event to NBA game ID using pre-built map
-        nba_game_id = game_id_map.get(event_id, str(event_id))
+        if not event_mapping.get("nba_game_id"):
+            logger.warning("Skipping FanDuel event %s because it has no NBA game mapping", event_mapping["event_id"])
+            continue
 
-        props.append({
-            'game_id': nba_game_id,
-            'player_id': player_id,
-            'player_name': player_name,
-            'stat_type': stat_type,
-            'line': line,
-            'over_odds': over_odds,
-            'under_odds': under_odds,
-            'captured_at': captured_at,
-        })
+        props.append(
+            {
+                "game_id": event_mapping["nba_game_id"],
+                "player_id": player_id,
+                "player_name": canonical_player_name,
+                "stat_type": stat_type,
+                "line": line,
+                "over_odds": int(over_odds),
+                "under_odds": int(under_odds),
+                "captured_at": captured_at,
+                "sportsbook": "fanduel",
+                "event_id": event_mapping["event_id"],
+                "event_name": event_mapping["event_name"],
+            }
+        )
 
     return props
 
-def scrape_props():
-    """
-    Full scrape pipeline.
-    Step 1 - get event IDs and names
-    Step 2 - build game ID map against NBA schedule
-    Step 3 - for each event, fetch each stat type
-    Returns list of clean prop records ready for database write.
-    """
-    print("Building ID maps...")
+
+def fetch_current_prop_board() -> dict[str, list[dict[str, Any]]]:
     player_id_map = get_player_id_map()
+    payloads: list[dict[str, Any]] = []
 
-    print("Fetching FanDuel event list...")
-    fd_events = fetch_nba_events()
-    if not fd_events:
-        print("No NBA events found on FanDuel")
-        return []
+    with httpx.Client(headers=HEADERS, timeout=FANDUEL_REQUEST_TIMEOUT) as client:
+        fd_events, schedule_payloads = fetch_nba_events(client)
+        payloads.extend(schedule_payloads)
+        if not fd_events:
+            return {"props": [], "event_mappings": [], "payloads": payloads}
 
-    game_id_map = build_game_id_map(fd_events)
-    print(f"Mapped {len(game_id_map)} FanDuel events to NBA game IDs")
+        event_mappings = build_event_mappings(fd_events)
+        event_mapping_by_id = {mapping["event_id"]: mapping for mapping in event_mappings}
 
-    all_props = []
+        all_props: list[dict[str, Any]] = []
+        for event in fd_events:
+            mapping = event_mapping_by_id[event["event_id"]]
+            if not mapping.get("nba_game_id"):
+                continue
 
-    for event in fd_events:
-        event_id = event['eventId']
-        for stat_key in PROP_TABS:
-            raw = fetch_event_props(event_id, stat_key)
-            if raw:
-                props = parse_event_props(
-                    event_id, raw, stat_key, game_id_map, player_id_map
-                )
-                all_props.extend(props)
-            time.sleep(0.5)
+            for stat_key in PROP_TABS:
+                raw_data, event_payloads = fetch_event_props(client, event["event_id"], stat_key)
+                payloads.extend(event_payloads)
+                if not raw_data:
+                    continue
+                all_props.extend(parse_event_props(mapping, raw_data, player_id_map))
 
-    print(f"Scraped {len(all_props)} props total")
-    return all_props
+    return {"props": all_props, "event_mappings": event_mappings, "payloads": payloads}
+
+
+def scrape_props() -> list[dict[str, Any]]:
+    return fetch_current_prop_board()["props"]
