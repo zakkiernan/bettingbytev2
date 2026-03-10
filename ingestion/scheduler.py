@@ -7,6 +7,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from ingestion.jobs import (
     bootstrap_backend,
     get_current_mode,
+    process_rotation_sync_queue,
     sync_daily_team_defense,
     sync_live_state_and_markets,
     sync_postgame_enrichment,
@@ -43,6 +44,18 @@ def run_scheduler_cycle() -> None:
         logger.info("Postgame enrichment completed for the current slate")
 
 
+def run_rotation_queue_cycle() -> None:
+    mode = get_current_mode()
+    if mode == "live":
+        logger.info("Skipping rotation queue cycle during live mode")
+        return
+    if mode == "postgame" and not _postgame_complete:
+        logger.info("Skipping rotation queue cycle until postgame enrichment completes")
+        return
+
+    process_rotation_sync_queue(batch_size=5, max_batches=1)
+
+
 def start_scheduler() -> BackgroundScheduler:
     bootstrap_backend()
 
@@ -63,6 +76,15 @@ def start_scheduler() -> BackgroundScheduler:
         minute=0,
         id="daily_team_defense",
         max_instances=1,
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        run_rotation_queue_cycle,
+        "interval",
+        minutes=5,
+        id="rotation_queue_cycle",
+        max_instances=1,
+        coalesce=True,
         replace_existing=True,
     )
 

@@ -21,6 +21,12 @@ from ingestion.nba_client import (
     get_todays_games_bundle,
     normalize_game_summary,
 )
+from ingestion.rotation_sync import (
+    enqueue_rotation_games,
+    record_rotation_sync_attempt,
+    seed_rotation_sync_states,
+    select_rotation_sync_batch,
+)
 from ingestion.validation import (
     get_missing_canonical_games_from_history,
     get_postgame_enrichment_backlog,
@@ -262,10 +268,15 @@ def sync_live_state_and_markets() -> dict[str, Any]:
 
 
 def _sync_game_rotation_for_game(game_id: str, run_id: int | None = None) -> dict[str, Any]:
-    rotation_stints, team_rotation_games, player_rotation_games, payloads, error_text = get_game_rotation_bundle(game_id)
-    write_source_payloads(payloads)
+    result = get_game_rotation_bundle(game_id)
+    write_source_payloads(result.payloads)
 
-    if not player_rotation_games:
+    if not result.player_rotation_games:
+        error_text = result.error_text or "GameRotation returned no player rotation summaries."
+        failure_metrics: dict[str, Any] = {"raw_payloads": len(result.payloads)}
+        if result.error_type is not None:
+            failure_metrics["error_type"] = result.error_type
+        failure_metrics.update(result.error_details)
         if run_id is not None:
             create_ingestion_run_item(
                 run_id=run_id,
@@ -273,20 +284,23 @@ def _sync_game_rotation_for_game(game_id: str, run_id: int | None = None) -> dic
                 entity_key=game_id,
                 stage="game_rotation",
                 status="failed",
-                error_text=error_text or "Game rotation endpoint returned no player rotation summaries.",
+                metrics=failure_metrics,
+                error_text=error_text,
             )
         return {
             "rotation_stints": 0,
             "team_rotation_games": 0,
             "player_rotation_games": 0,
-            "raw_payloads": len(payloads),
+            "raw_payloads": len(result.payloads),
+            "error_type": result.error_type,
             "error_text": error_text,
+            "error_details": dict(result.error_details),
         }
 
-    write_players(_players_from_rows(player_rotation_games))
-    write_team_rotation_games(team_rotation_games)
-    write_player_rotation_games(player_rotation_games)
-    write_player_rotation_stints(rotation_stints)
+    write_players(_players_from_rows(result.player_rotation_games))
+    write_team_rotation_games(result.team_rotation_games)
+    write_player_rotation_games(result.player_rotation_games)
+    write_player_rotation_stints(result.rotations)
 
     if run_id is not None:
         create_ingestion_run_item(
@@ -296,33 +310,35 @@ def _sync_game_rotation_for_game(game_id: str, run_id: int | None = None) -> dic
             stage="game_rotation",
             status="success",
             metrics={
-                "rotation_stints": len(rotation_stints),
-                "team_rotation_games": len(team_rotation_games),
-                "player_rotation_games": len(player_rotation_games),
+                "rotation_stints": len(result.rotations),
+                "team_rotation_games": len(result.team_rotation_games),
+                "player_rotation_games": len(result.player_rotation_games),
+                "raw_payloads": len(result.payloads),
             },
         )
 
     return {
-        "rotation_stints": len(rotation_stints),
-        "team_rotation_games": len(team_rotation_games),
-        "player_rotation_games": len(player_rotation_games),
-        "raw_payloads": len(payloads),
+        "rotation_stints": len(result.rotations),
+        "team_rotation_games": len(result.team_rotation_games),
+        "player_rotation_games": len(result.player_rotation_games),
+        "raw_payloads": len(result.payloads),
+        "error_type": None,
+        "error_text": None,
+        "error_details": {},
     }
 
 
-def _backfill_historical_rotations_impl(
+
+def _process_rotation_sync_queue_impl(
     season: str = DEFAULT_SEASON,
-    batch_size: int = 25,
+    batch_size: int = 5,
     max_batches: int | None = None,
     specific_game_ids: list[str] | None = None,
+    force_retry: bool = False,
     run_id: int | None = None,
 ) -> dict[str, Any]:
-    backlog_rows = get_rotation_backlog(season=season)
-    if specific_game_ids is not None:
-        allowed = set(specific_game_ids)
-        backlog_rows = [row for row in backlog_rows if row["game_id"] in allowed]
-
-    total_candidates = len(backlog_rows)
+    seed_metrics = seed_rotation_sync_states(season=season, specific_game_ids=specific_game_ids)
+    total_candidates = int(seed_metrics.get("seeded_games", 0))
     if total_candidates == 0:
         return {
             "season": season,
@@ -333,7 +349,15 @@ def _backfill_historical_rotations_impl(
             "rotation_stints": 0,
             "player_rotation_games": 0,
             "team_rotation_games": 0,
+            "raw_payloads": 0,
             "batches": 0,
+            "remaining_backlog": 0,
+            "pending_games_selected": 0,
+            "retry_games_selected": 0,
+            "skipped_cooldown_games": 0,
+            "quarantined_games": 0,
+            "force_retry": force_retry,
+            **seed_metrics,
         }
 
     processed_games = 0
@@ -343,25 +367,59 @@ def _backfill_historical_rotations_impl(
     player_rotation_games_written = 0
     team_rotation_games_written = 0
     payload_count = 0
+    pending_games_selected = 0
+    retry_games_selected = 0
+    skipped_cooldown_games = 0
+    quarantined_games = 0
     batch_counter = 0
 
-    for offset in range(0, total_candidates, batch_size):
+    while True:
         if max_batches is not None and batch_counter >= max_batches:
             break
+
+        selection = select_rotation_sync_batch(
+            season=season,
+            batch_size=batch_size,
+            specific_game_ids=specific_game_ids,
+            force_retry=force_retry,
+        )
+        selected_game_ids = selection["selected_game_ids"]
+        if not selected_game_ids:
+            skipped_cooldown_games += int(selection.get("skipped_cooldown_games", 0))
+            quarantined_games += int(selection.get("quarantined_games", 0))
+            break
+
         batch_counter += 1
-        batch = backlog_rows[offset : offset + batch_size]
-        for row in batch:
-            game_id = str(row["game_id"])
+        pending_games_selected += int(selection.get("pending_games_selected", 0))
+        retry_games_selected += int(selection.get("retry_games_selected", 0))
+        skipped_cooldown_games += int(selection.get("skipped_cooldown_games", 0))
+        quarantined_games += int(selection.get("quarantined_games", 0))
+
+        for game_id in selected_game_ids:
             metrics = _sync_game_rotation_for_game(game_id, run_id=run_id)
             processed_games += 1
             payload_count += int(metrics.get("raw_payloads", 0))
-            if int(metrics.get("player_rotation_games", 0)) == 0:
+            successful = int(metrics.get("player_rotation_games", 0)) > 0
+            record_rotation_sync_attempt(
+                game_id,
+                season,
+                successful=successful,
+                run_id=run_id,
+                error_type=metrics.get("error_type"),
+                error_text=metrics.get("error_text"),
+            )
+            if not successful:
                 failed_games += 1
                 continue
             successful_games += 1
             rotation_stints_written += int(metrics.get("rotation_stints", 0))
             player_rotation_games_written += int(metrics.get("player_rotation_games", 0))
             team_rotation_games_written += int(metrics.get("team_rotation_games", 0))
+
+    remaining_backlog_rows = get_rotation_backlog(season=season)
+    if specific_game_ids is not None:
+        allowed = {str(game_id) for game_id in specific_game_ids}
+        remaining_backlog_rows = [row for row in remaining_backlog_rows if str(row["game_id"]) in allowed]
 
     return {
         "season": season,
@@ -374,8 +432,34 @@ def _backfill_historical_rotations_impl(
         "team_rotation_games": team_rotation_games_written,
         "raw_payloads": payload_count,
         "batches": batch_counter,
-        "remaining_backlog": max(total_candidates - processed_games, 0),
+        "remaining_backlog": len(remaining_backlog_rows),
+        "pending_games_selected": pending_games_selected,
+        "retry_games_selected": retry_games_selected,
+        "skipped_cooldown_games": skipped_cooldown_games,
+        "quarantined_games": quarantined_games,
+        "force_retry": force_retry,
+        **seed_metrics,
     }
+
+
+
+def process_rotation_sync_queue(
+    season: str = DEFAULT_SEASON,
+    batch_size: int = 5,
+    max_batches: int | None = None,
+    specific_game_ids: list[str] | None = None,
+    force_retry: bool = False,
+) -> dict[str, Any]:
+    return _run_logged_job(
+        "process_rotation_sync_queue",
+        _process_rotation_sync_queue_impl,
+        season,
+        batch_size,
+        max_batches,
+        specific_game_ids,
+        force_retry,
+    )
+
 
 
 def backfill_historical_rotations(
@@ -386,15 +470,16 @@ def backfill_historical_rotations(
 ) -> dict[str, Any]:
     return _run_logged_job(
         "backfill_historical_rotations",
-        _backfill_historical_rotations_impl,
+        _process_rotation_sync_queue_impl,
         season,
         batch_size,
         max_batches,
         specific_game_ids,
+        False,
     )
 
 
-def _sync_postgame_enrichment_impl(run_id: int | None = None) -> dict[str, int]:
+def _sync_postgame_enrichment_impl(run_id: int | None = None) -> dict[str, Any]:
     live_games, live_payloads = get_live_scoreboard_bundle()
     write_source_payloads(live_payloads)
     finished_game_ids = [game["game_id"] for game in live_games if game.get("game_status") == STATUS_FINISHED]
@@ -406,7 +491,7 @@ def _sync_postgame_enrichment_impl(run_id: int | None = None) -> dict[str, int]:
     )
 
 
-def sync_postgame_enrichment() -> dict[str, int]:
+def sync_postgame_enrichment() -> dict[str, Any]:
     return _run_logged_job("sync_postgame_enrichment", _sync_postgame_enrichment_impl)
 
 
@@ -494,6 +579,7 @@ def _backfill_postgame_enrichment_impl(
             "rotation_stints": 0,
             "player_rotation_games": 0,
             "team_rotation_games": 0,
+            "rotation_queue_games_enqueued": 0,
             "failed_games": 0,
             "batches": 0,
             **reconciliation,
@@ -503,9 +589,7 @@ def _backfill_postgame_enrichment_impl(
     successful_games = 0
     failed_games = 0
     written_rows = 0
-    rotation_stints_written = 0
-    player_rotation_games_written = 0
-    team_rotation_games_written = 0
+    rotation_queue_games_enqueued = 0
     batch_counter = 0
 
     for offset in range(0, total_candidates, batch_size):
@@ -519,7 +603,6 @@ def _backfill_postgame_enrichment_impl(
             summary_data, summary_payloads = get_boxscore_summary_bundle(game_id)
             advanced_logs, advanced_payloads = get_advanced_boxscore_bundle(game_id)
             tracking_logs, tracking_payloads = get_player_tracking_bundle(game_id)
-            rotation_metrics = _sync_game_rotation_for_game(game_id, run_id=run_id)
 
             write_source_payloads(summary_payloads + advanced_payloads + tracking_payloads)
 
@@ -529,9 +612,8 @@ def _backfill_postgame_enrichment_impl(
 
             merged_logs = _merge_advanced_and_tracking(advanced_logs, tracking_logs)
             processed_games += 1
-            rotation_stints_written += int(rotation_metrics.get("rotation_stints", 0))
-            player_rotation_games_written += int(rotation_metrics.get("player_rotation_games", 0))
-            team_rotation_games_written += int(rotation_metrics.get("team_rotation_games", 0))
+            enqueued_count = enqueue_rotation_games([game_id], season=season)
+            rotation_queue_games_enqueued += enqueued_count
             if not merged_logs:
                 failed_games += 1
                 create_ingestion_run_item(
@@ -543,8 +625,8 @@ def _backfill_postgame_enrichment_impl(
                     metrics={
                         "historical_players": row["historical_players"],
                         "advanced_players": row["advanced_players"],
-                        "rotation_stints": rotation_metrics.get("rotation_stints", 0),
-                        "player_rotation_games": rotation_metrics.get("player_rotation_games", 0),
+                        "tracking_players": len(tracking_logs),
+                        "rotation_queue_games_enqueued": enqueued_count,
                     },
                     error_text="Advanced and tracking endpoints returned no rows.",
                 )
@@ -565,8 +647,7 @@ def _backfill_postgame_enrichment_impl(
                     "advanced_players": len(advanced_logs),
                     "tracking_players": len(tracking_logs),
                     "merged_players": len(merged_logs),
-                    "rotation_stints": rotation_metrics.get("rotation_stints", 0),
-                    "player_rotation_games": rotation_metrics.get("player_rotation_games", 0),
+                    "rotation_queue_games_enqueued": enqueued_count,
                 },
             )
 
@@ -578,9 +659,10 @@ def _backfill_postgame_enrichment_impl(
         "successful_games": successful_games,
         "failed_games": failed_games,
         "advanced_logs": written_rows,
-        "rotation_stints": rotation_stints_written,
-        "player_rotation_games": player_rotation_games_written,
-        "team_rotation_games": team_rotation_games_written,
+        "rotation_stints": 0,
+        "player_rotation_games": 0,
+        "team_rotation_games": 0,
+        "rotation_queue_games_enqueued": rotation_queue_games_enqueued,
         "batches": batch_counter,
         "remaining_backlog": max(total_candidates - processed_games, 0),
         **reconciliation,
@@ -603,7 +685,7 @@ def backfill_postgame_enrichment(
     )
 
 
-def ingestion_health_report() -> dict[str, int | float]:
+def ingestion_health_report() -> dict[str, Any]:
     return _run_logged_job("ingestion_health_report", lambda run_id=None: summarize_ingestion_health())
 
 

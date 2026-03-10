@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import func
 
@@ -19,10 +20,16 @@ from database.models import (
     PlayerPropSnapshot,
     PlayerRotationGame,
     PlayerRotationStint,
+    RotationSyncState,
     SourcePayload,
     SportsbookEventMap,
     Team,
     TeamRotationGame,
+)
+from ingestion.rotation_sync import (
+    ROTATION_SYNC_STATUS_PENDING,
+    ROTATION_SYNC_STATUS_QUARANTINED,
+    ROTATION_SYNC_STATUS_RETRY,
 )
 
 FINAL_GAME_STATUS = 3
@@ -89,7 +96,6 @@ def get_postgame_enrichment_backlog(season: str | None = None) -> list[dict[str,
 
     backlog.sort(key=lambda row: (-int(row["missing_players"]), str(row["game_id"])))
     return backlog
-
 
 
 def get_rotation_backlog(season: str | None = None) -> list[dict[str, int | str]]:
@@ -186,8 +192,48 @@ def get_missing_canonical_games_from_history(season: str | None = None) -> list[
     return canonical_games
 
 
+def get_rotation_queue_diagnostics(
+    season: str | None = None,
+    statuses: list[str] | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    with session_scope() as session:
+        query = session.query(RotationSyncState)
+        if season is not None:
+            query = query.filter(RotationSyncState.season == season)
+        if statuses:
+            query = query.filter(RotationSyncState.status.in_(statuses))
+        rows = query.all()
 
-def summarize_ingestion_health() -> dict[str, int | float]:
+    rows = sorted(
+        rows,
+        key=lambda row: (
+            row.next_retry_at or datetime.min,
+            -int(row.consecutive_failures or 0),
+            str(row.game_id),
+        ),
+    )[:limit]
+
+    return [
+        {
+            "game_id": row.game_id,
+            "season": row.season,
+            "status": row.status,
+            "attempt_count": int(row.attempt_count or 0),
+            "consecutive_failures": int(row.consecutive_failures or 0),
+            "last_attempted_at": row.last_attempted_at,
+            "last_succeeded_at": row.last_succeeded_at,
+            "next_retry_at": row.next_retry_at,
+            "last_error_type": row.last_error_type,
+            "last_error_text": row.last_error_text,
+            "last_run_id": row.last_run_id,
+        }
+        for row in rows
+    ]
+
+
+def summarize_ingestion_health() -> dict[str, Any]:
+    now = datetime.utcnow()
     with session_scope() as session:
         historical_game_ids = {row[0] for row in session.query(HistoricalGameLog.game_id).distinct().all()}
         enriched_game_ids = {row[0] for row in session.query(HistoricalAdvancedLog.game_id).distinct().all()}
@@ -212,6 +258,52 @@ def summarize_ingestion_health() -> dict[str, int | float]:
         failed_run_items = int(
             session.query(func.count(IngestionRunItem.id)).filter(IngestionRunItem.status == "failed").scalar() or 0
         )
+
+        rotation_queue_pending = int(
+            session.query(func.count(RotationSyncState.game_id))
+            .filter(RotationSyncState.status == ROTATION_SYNC_STATUS_PENDING)
+            .scalar()
+            or 0
+        )
+        rotation_queue_retry = int(
+            session.query(func.count(RotationSyncState.game_id))
+            .filter(RotationSyncState.status == ROTATION_SYNC_STATUS_RETRY)
+            .scalar()
+            or 0
+        )
+        rotation_queue_quarantined = int(
+            session.query(func.count(RotationSyncState.game_id))
+            .filter(RotationSyncState.status == ROTATION_SYNC_STATUS_QUARANTINED)
+            .scalar()
+            or 0
+        )
+        rotation_queue_due_now = int(
+            session.query(func.count(RotationSyncState.game_id))
+            .filter(
+                RotationSyncState.status == ROTATION_SYNC_STATUS_RETRY,
+                RotationSyncState.next_retry_at.is_not(None),
+                RotationSyncState.next_retry_at <= now,
+            )
+            .scalar()
+            or 0
+        )
+        failure_rows = (
+            session.query(
+                RotationSyncState.last_error_type,
+                func.count(RotationSyncState.game_id).label("count"),
+            )
+            .filter(
+                RotationSyncState.status.in_([ROTATION_SYNC_STATUS_RETRY, ROTATION_SYNC_STATUS_QUARANTINED]),
+                RotationSyncState.last_error_type.is_not(None),
+            )
+            .group_by(RotationSyncState.last_error_type)
+            .all()
+        )
+        rotation_recent_failure_counts = {
+            str(row.last_error_type): int(row.count)
+            for row in failure_rows
+            if row.last_error_type
+        }
 
     enrichment_coverage = round((enriched_games / historical_games) * 100, 2) if historical_games else 0.0
     rotation_coverage = round((rotation_games / historical_games) * 100, 2) if historical_games else 0.0
@@ -254,13 +346,17 @@ def summarize_ingestion_health() -> dict[str, int | float]:
             "player_rotation_stints": int(session.query(func.count(PlayerRotationStint.id)).scalar() or 0),
             "rotation_games": rotation_games,
             "rotation_coverage_pct": rotation_coverage,
+            "rotation_queue_pending": rotation_queue_pending,
+            "rotation_queue_retry": rotation_queue_retry,
+            "rotation_queue_quarantined": rotation_queue_quarantined,
+            "rotation_queue_due_now": rotation_queue_due_now,
+            "rotation_recent_failure_counts": rotation_recent_failure_counts,
             "live_game_snapshots": int(session.query(func.count(LiveGameSnapshot.id)).scalar() or 0),
             "live_player_snapshots": int(session.query(func.count(LivePlayerSnapshot.id)).scalar() or 0),
             "failed_runs": failed_runs,
             "failed_run_items": failed_run_items,
             "unresolved_failed_run_items": unresolved_failed_run_items,
         }
-
 
 
 def get_recent_run_item_failures(limit: int = 20) -> list[dict[str, str | int | None]]:

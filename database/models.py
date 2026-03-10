@@ -466,6 +466,34 @@ class IngestionRunItem(Base):
     run: Mapped[IngestionRun] = relationship("IngestionRun", back_populates="items")
 
 
+class RotationSyncState(Base):
+    __tablename__ = "rotation_sync_states"
+    __table_args__ = (
+        Index("ix_rotation_sync_state_season", "season"),
+        Index("ix_rotation_sync_state_season_status", "season", "status", "next_retry_at"),
+        Index("ix_rotation_sync_state_status_due", "status", "next_retry_at"),
+    )
+
+    game_id: Mapped[str] = mapped_column(String, primary_key=True)
+    season: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_attempted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_succeeded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_run_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+
 class ModelSignal(Base):
     __tablename__ = "model_signals"
     __table_args__ = (

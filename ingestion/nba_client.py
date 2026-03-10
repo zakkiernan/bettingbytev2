@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 import time
 import unicodedata
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from functools import lru_cache
 from json import JSONDecodeError
 from typing import Any, Callable
 
+import requests
 from nba_api.live.nba.endpoints import boxscore as live_boxscore
 from nba_api.live.nba.endpoints import scoreboard as live_scoreboard
 from nba_api.stats.endpoints import (
@@ -18,13 +21,14 @@ from nba_api.stats.endpoints import (
     boxscoreplayertrackv3,
     boxscoretraditionalv3,
     boxscoreusagev3,
-    gamerotation,
     leaguegamelog,
     leaguedashptteamdefend,
     leaguedashteamstats,
     playbyplayv3,
     scoreboardv3,
 )
+from nba_api.stats.library.http import NBAStatsHTTP
+from nba_api.stats.library.parameters import LeagueID
 from nba_api.stats.static import players, teams
 
 logger = logging.getLogger(__name__)
@@ -95,6 +99,10 @@ def _format_exception_message(exc: Exception) -> str:
 
 
 def _is_transient_game_rotation_error(exc: Exception) -> bool:
+    if isinstance(exc, RotationFetchError):
+        return exc.error_type in _GAME_ROTATION_TRANSIENT_ERROR_TYPES
+    if isinstance(exc, requests.Timeout):
+        return True
     if isinstance(exc, JSONDecodeError):
         return True
 
@@ -729,6 +737,170 @@ def get_usage_boxscore(game_id: str) -> list[dict[str, Any]]:
         return []
 
 
+@dataclass(slots=True)
+class RotationFetchError(Exception):
+    error_type: str
+    error_text: str
+    status_code: int | None = None
+    content_type: str | None = None
+    body_prefix: str | None = None
+    url: str | None = None
+
+    def __str__(self) -> str:
+        return self.error_text
+
+
+@dataclass(slots=True)
+class GameRotationBundleResult:
+    rotations: list[dict[str, Any]] = field(default_factory=list)
+    team_rotation_games: list[dict[str, Any]] = field(default_factory=list)
+    player_rotation_games: list[dict[str, Any]] = field(default_factory=list)
+    payloads: list[dict[str, Any]] = field(default_factory=list)
+    error_type: str | None = None
+    error_text: str | None = None
+    error_details: dict[str, Any] = field(default_factory=dict)
+
+
+_GAME_ROTATION_EXPECTED_RESULT_SETS = {"AwayTeam", "HomeTeam"}
+_GAME_ROTATION_TRANSIENT_ERROR_TYPES = {
+    "timeout",
+    "empty_response",
+    "non_json_response",
+    "http_429_or_5xx",
+    "other_parse_error",
+}
+
+
+def _game_rotation_error_details(
+    *,
+    status_code: int | None = None,
+    content_type: str | None = None,
+    body_prefix: str | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    details: dict[str, Any] = {}
+    if status_code is not None:
+        details["status_code"] = int(status_code)
+    if content_type:
+        details["content_type"] = content_type
+    if body_prefix:
+        details["body_prefix"] = body_prefix
+    if url:
+        details["url"] = url
+    return details
+
+
+def _rotation_body_prefix(body: str | None, limit: int = 240) -> str | None:
+    if body is None:
+        return None
+    cleaned = " ".join(body.split())
+    if not cleaned:
+        return None
+    return cleaned[:limit]
+
+
+def _raise_rotation_fetch_error(
+    error_type: str,
+    error_text: str,
+    *,
+    status_code: int | None = None,
+    content_type: str | None = None,
+    body_prefix: str | None = None,
+    url: str | None = None,
+) -> None:
+    raise RotationFetchError(
+        error_type=error_type,
+        error_text=error_text,
+        status_code=status_code,
+        content_type=content_type,
+        body_prefix=body_prefix,
+        url=url,
+    )
+
+
+def _coerce_game_rotation_result_sets(data: dict[str, Any]) -> list[dict[str, Any]]:
+    result_sets = data.get("resultSets")
+    if result_sets is None:
+        result_sets = data.get("resultSet")
+    if isinstance(result_sets, dict):
+        result_sets = [result_sets]
+    if not isinstance(result_sets, list):
+        raise RotationFetchError("unexpected_schema", "GameRotation response missing resultSets.")
+
+    normalized_result_sets = [result_set for result_set in result_sets if isinstance(result_set, dict)]
+    names = {str(result_set.get("name")) for result_set in normalized_result_sets}
+    missing_names = sorted(_GAME_ROTATION_EXPECTED_RESULT_SETS - names)
+    if missing_names:
+        raise RotationFetchError(
+            "unexpected_schema",
+            f"GameRotation response missing expected result sets: {', '.join(missing_names)}.",
+        )
+
+    return [result_set for result_set in normalized_result_sets if str(result_set.get("name")) in _GAME_ROTATION_EXPECTED_RESULT_SETS]
+
+
+def _request_game_rotation_payload(game_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    http_client = NBAStatsHTTP()
+    url = http_client.base_url.format(endpoint="gamerotation")
+    headers = dict(http_client.headers)
+    params = sorted({"GameID": game_id, "LeagueID": LeagueID.default}.items(), key=lambda item: item[0])
+
+    try:
+        response = http_client.get_session().get(
+            url=url,
+            params=params,
+            headers=headers,
+            timeout=NBA_REQUEST_TIMEOUT,
+        )
+    except requests.Timeout as exc:
+        raise RotationFetchError("timeout", f"GameRotation timed out: {_format_exception_message(exc)}") from exc
+    except requests.RequestException as exc:
+        raise RotationFetchError("timeout", f"GameRotation request failed: {_format_exception_message(exc)}") from exc
+
+    content_type = response.headers.get("Content-Type")
+    body_text = response.text
+    body_prefix = _rotation_body_prefix(body_text)
+    details = _game_rotation_error_details(
+        status_code=response.status_code,
+        content_type=content_type,
+        body_prefix=body_prefix,
+        url=response.url,
+    )
+
+    if response.status_code == 429 or response.status_code >= 500:
+        _raise_rotation_fetch_error(
+            "http_429_or_5xx",
+            f"GameRotation HTTP {response.status_code}.",
+            **details,
+        )
+
+    if not body_text or not body_text.strip():
+        _raise_rotation_fetch_error(
+            "empty_response",
+            "GameRotation returned an empty response body.",
+            **details,
+        )
+
+    try:
+        data = json.loads(body_text)
+    except JSONDecodeError as exc:
+        error_type = "non_json_response" if content_type and "json" not in content_type.lower() else "other_parse_error"
+        if error_type == "non_json_response":
+            error_text = f"GameRotation returned non-JSON response ({content_type or 'unknown'})."
+        else:
+            error_text = f"GameRotation returned malformed JSON: {_format_exception_message(exc)}"
+        _raise_rotation_fetch_error(error_type, error_text, **details)
+
+    if not isinstance(data, dict):
+        _raise_rotation_fetch_error(
+            "unexpected_schema",
+            "GameRotation response root was not a JSON object.",
+            **details,
+        )
+
+    return data, details
+
+
 def _normalize_game_rotation_result_sets(result_sets: list[dict[str, Any]]) -> list[dict[str, Any]]:
     team_lookup = _team_lookup()
     rotations: list[dict[str, Any]] = []
@@ -842,44 +1014,66 @@ def _summarize_game_rotation(rotations: list[dict[str, Any]]) -> tuple[list[dict
     return team_summaries, player_summaries
 
 
-def _fetch_game_rotation_bundle_once(
-    game_id: str,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    endpoint = _call_with_retries(
-        "NBA game rotation",
-        lambda: gamerotation.GameRotation(game_id=game_id, timeout=NBA_REQUEST_TIMEOUT),
-        identifier=game_id,
-    )
-    data = endpoint.get_dict()
-    result_sets = data.get("resultSets", [])
+def _fetch_game_rotation_bundle_once(game_id: str) -> GameRotationBundleResult:
+    data, details = _request_game_rotation_payload(game_id)
+    result_sets = _coerce_game_rotation_result_sets(data)
     _sleep_for_rate_limit()
 
     rotations = _normalize_game_rotation_result_sets(result_sets)
     team_summaries, player_summaries = _summarize_game_rotation(rotations)
-    return rotations, team_summaries, player_summaries, [_payload("nba", "game_rotation", data, external_id=game_id)]
+    if not player_summaries:
+        _raise_rotation_fetch_error(
+            "unexpected_schema",
+            "GameRotation response returned no player rotation summaries.",
+            **details,
+        )
+
+    return GameRotationBundleResult(
+        rotations=rotations,
+        team_rotation_games=team_summaries,
+        player_rotation_games=player_summaries,
+        payloads=[_payload("nba", "game_rotation", data, external_id=game_id)],
+    )
 
 
-def get_game_rotation_bundle(
-    game_id: str,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], str | None]:
+def _rotation_failure_result(error_type: str, error_text: str, error_details: dict[str, Any] | None = None) -> GameRotationBundleResult:
+    return GameRotationBundleResult(
+        error_type=error_type,
+        error_text=error_text,
+        error_details=error_details or {},
+    )
+
+
+def get_game_rotation_bundle(game_id: str) -> GameRotationBundleResult:
     try:
-        rotations, team_summaries, player_summaries, payloads = _call_with_retries(
+        return _call_with_retries(
             "NBA game rotation bundle",
             lambda: _fetch_game_rotation_bundle_once(game_id),
             identifier=game_id,
             retries=NBA_GAME_ROTATION_PASSES,
             retry_predicate=_is_transient_game_rotation_error,
         )
-        return rotations, team_summaries, player_summaries, payloads, None
+    except RotationFetchError as exc:
+        logger.exception("Failed to fetch game rotation for game %s: %s", game_id, exc.error_text)
+        return _rotation_failure_result(
+            exc.error_type,
+            exc.error_text,
+            _game_rotation_error_details(
+                status_code=exc.status_code,
+                content_type=exc.content_type,
+                body_prefix=exc.body_prefix,
+                url=exc.url,
+            ),
+        )
     except Exception as exc:
         error_text = _format_exception_message(exc)
         logger.exception("Failed to fetch game rotation for game %s: %s", game_id, error_text)
-        return [], [], [], [], error_text
+        error_type = "timeout" if "timeout" in error_text.lower() or "timed out" in error_text.lower() else "other_parse_error"
+        return _rotation_failure_result(error_type, error_text)
 
 
 def get_game_rotation(game_id: str) -> list[dict[str, Any]]:
-    rotations, _, _, _, _ = get_game_rotation_bundle(game_id)
-    return rotations
+    return get_game_rotation_bundle(game_id).rotations
 
 
 def get_play_by_play(game_id: str) -> list[dict[str, Any]]:
