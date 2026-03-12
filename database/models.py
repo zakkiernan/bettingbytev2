@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database.db import Base
@@ -426,6 +426,53 @@ class LivePlayerSnapshot(Base):
     on_court: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     starter: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     captured_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
+class OfficialInjuryReport(Base):
+    __tablename__ = "official_injury_reports"
+    __table_args__ = (
+        UniqueConstraint("pdf_url", name="uq_official_injury_report_pdf_url"),
+        Index("ix_official_injury_report_datetime", "report_datetime_utc"),
+        Index("ix_official_injury_report_date", "report_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    season: Mapped[str | None] = mapped_column(String, nullable=True)
+    report_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    report_time_et: Mapped[str | None] = mapped_column(String, nullable=True)
+    report_datetime_utc: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    pdf_url: Mapped[str] = mapped_column(String, nullable=False)
+    pdf_sha256: Mapped[str | None] = mapped_column(String, nullable=True)
+    game_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    entry_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class OfficialInjuryReportEntry(Base):
+    __tablename__ = "official_injury_report_entries"
+    __table_args__ = (
+        Index("ix_official_injury_report_entry_report", "report_id", "team_abbreviation"),
+        Index("ix_official_injury_report_entry_player", "player_id", "report_datetime_utc"),
+        Index("ix_official_injury_report_entry_team_date", "team_abbreviation", "game_date", "report_datetime_utc"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    report_id: Mapped[int] = mapped_column(ForeignKey("official_injury_reports.id"), nullable=False, index=True)
+    season: Mapped[str | None] = mapped_column(String, nullable=True)
+    report_datetime_utc: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    game_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    game_time_et: Mapped[str | None] = mapped_column(String, nullable=True)
+    matchup: Mapped[str | None] = mapped_column(String, nullable=True)
+    team_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    team_abbreviation: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    team_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    player_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    player_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    current_status: Mapped[str | None] = mapped_column(String, nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    report_submitted: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    source: Mapped[str] = mapped_column(String, nullable=False, default="official_nba_pdf")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class IngestionRun(Base):

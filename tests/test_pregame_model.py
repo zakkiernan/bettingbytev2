@@ -96,6 +96,57 @@ class PregamePointsModelTests(unittest.TestCase):
         self.assertGreater(projection.over_probability, 0.54)
         self.assertGreater(projection.confidence, 0.4)
 
+
+    def test_projection_uses_opportunity_backbone_for_role_lift(self):
+        low_role = project_pregame_points(
+            self.build_feature(
+                rotation_sample_size=8,
+                season_rotation_minutes_avg=24.0,
+                last10_rotation_minutes_avg=23.5,
+                last5_rotation_minutes_avg=23.0,
+                last10_rotation_minutes_std=3.5,
+                season_stint_count_avg=4.2,
+                last10_stint_count_avg=4.0,
+                last5_stint_count_avg=4.0,
+                season_started_rate=0.2,
+                last10_started_rate=0.2,
+                last5_started_rate=0.2,
+                season_closed_rate=0.2,
+                last10_closed_rate=0.2,
+                last5_closed_rate=0.2,
+                season_usage_pct=0.24,
+                last10_usage_pct=0.24,
+                last5_usage_pct=0.24,
+            )
+        )
+        high_role = project_pregame_points(
+            self.build_feature(
+                season_rotation_minutes_avg=36.0,
+                last10_rotation_minutes_avg=37.0,
+                last5_rotation_minutes_avg=37.5,
+                season_started_rate=1.0,
+                last10_started_rate=1.0,
+                last5_started_rate=1.0,
+                season_closed_rate=0.9,
+                last10_closed_rate=0.9,
+                last5_closed_rate=0.9,
+                season_usage_pct=0.30,
+                last10_usage_pct=0.31,
+                last5_usage_pct=0.315,
+                season_est_usage_pct=0.29,
+                last10_est_usage_pct=0.30,
+                last5_est_usage_pct=0.305,
+                season_touches=64.0,
+                last10_touches=67.0,
+                last5_touches=68.5,
+            )
+        )
+
+        self.assertGreater(high_role.breakdown.expected_minutes, low_role.breakdown.expected_minutes)
+        self.assertGreater(high_role.breakdown.opportunity_score, low_role.breakdown.opportunity_score)
+        self.assertGreater(high_role.projected_value, low_role.projected_value)
+        self.assertGreater(high_role.confidence, low_role.confidence)
+
     def test_projection_bounds_outputs(self):
         projection = project_pregame_points(
             self.build_feature(

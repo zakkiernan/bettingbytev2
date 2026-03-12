@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import traceback
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Callable
 
 from database.db import init_db
 from ingestion.fanduel_client import fetch_current_prop_board
+from ingestion.injury_reports import backfill_official_injury_reports as backfill_official_injury_reports_impl, sync_official_injury_report as sync_official_injury_report_impl
+from ingestion.pregame_context import build_pregame_context_source_payloads, sync_pregame_context as sync_current_pregame_context
 from ingestion.nba_client import (
     DEFAULT_SEASON,
     get_advanced_boxscore_bundle,
     get_boxscore_summary_bundle,
-    get_game_rotation_bundle,
     get_historical_player_game_logs_bundle,
     get_live_boxscore_bundle,
     get_live_scoreboard_bundle,
@@ -21,6 +22,7 @@ from ingestion.nba_client import (
     get_todays_games_bundle,
     normalize_game_summary,
 )
+from ingestion.rotation_provider import get_rotation_bundle
 from ingestion.rotation_sync import (
     enqueue_rotation_games,
     record_rotation_sync_attempt,
@@ -186,11 +188,23 @@ def _sync_pregame_markets_impl(run_id: int | None = None) -> dict[str, int]:
     write_prop_snapshot(props, is_live=False)
     write_odds_snapshot(props, market_phase="pregame")
 
+    pregame_context_result = sync_current_pregame_context(captured_at=board.get("captured_at"), stat_type="points")
+    pregame_context_payloads = build_pregame_context_source_payloads(pregame_context_result)
+    write_source_payloads(pregame_context_payloads)
+
     return {
         "props": len(props),
         "event_mappings": len(event_mappings),
         "unmapped_events": unmapped_events,
-        "raw_payloads": len(payloads) + len(schedule_payloads_today) + len(schedule_payloads_tomorrow),
+        "raw_payloads": len(payloads) + len(schedule_payloads_today) + len(schedule_payloads_tomorrow) + len(pregame_context_payloads),
+        "pregame_context_games": len(pregame_context_result.payload.get("games", [])),
+        "pregame_context_rows": len(pregame_context_result.feature_rows),
+        "pregame_context_attached_count": int(pregame_context_result.attachment_metrics.get("attached_count", 0)),
+        "pregame_context_attached_pct": float(pregame_context_result.attachment_metrics.get("attached_pct", 0.0)),
+        "pregame_context_overlap_game_count": int(pregame_context_result.attachment_metrics.get("overlap_game_count", 0)),
+        "pregame_context_missing_game_count": len(pregame_context_result.attachment_metrics.get("missing_context_game_ids", [])),
+        "pregame_context_projected_unavailable_count": int(pregame_context_result.attachment_metrics.get("projected_unavailable_count", 0)),
+        "pregame_context_high_late_scratch_risk_count": int(pregame_context_result.attachment_metrics.get("high_late_scratch_risk_count", 0)),
     }
 
 
@@ -267,12 +281,12 @@ def sync_live_state_and_markets() -> dict[str, Any]:
     return _run_logged_job("sync_live_state_and_markets", _sync_live_state_and_markets_impl)
 
 
-def _sync_game_rotation_for_game(game_id: str, run_id: int | None = None) -> dict[str, Any]:
-    result = get_game_rotation_bundle(game_id)
+def _sync_rotation_for_game(game_id: str, run_id: int | None = None) -> dict[str, Any]:
+    result = get_rotation_bundle(game_id)
     write_source_payloads(result.payloads)
 
     if not result.player_rotation_games:
-        error_text = result.error_text or "GameRotation returned no player rotation summaries."
+        error_text = result.error_text or "Rotation scraper returned no player rotation summaries."
         failure_metrics: dict[str, Any] = {"raw_payloads": len(result.payloads)}
         if result.error_type is not None:
             failure_metrics["error_type"] = result.error_type
@@ -295,6 +309,7 @@ def _sync_game_rotation_for_game(game_id: str, run_id: int | None = None) -> dic
             "error_type": result.error_type,
             "error_text": error_text,
             "error_details": dict(result.error_details),
+            "complete": False,
         }
 
     write_players(_players_from_rows(result.player_rotation_games))
@@ -325,8 +340,8 @@ def _sync_game_rotation_for_game(game_id: str, run_id: int | None = None) -> dic
         "error_type": None,
         "error_text": None,
         "error_details": {},
+        "complete": True,
     }
-
 
 
 def _process_rotation_sync_queue_impl(
@@ -372,6 +387,7 @@ def _process_rotation_sync_queue_impl(
     skipped_cooldown_games = 0
     quarantined_games = 0
     batch_counter = 0
+    remaining_specific_game_ids = [str(game_id) for game_id in specific_game_ids] if specific_game_ids is not None else None
 
     while True:
         if max_batches is not None and batch_counter >= max_batches:
@@ -380,7 +396,7 @@ def _process_rotation_sync_queue_impl(
         selection = select_rotation_sync_batch(
             season=season,
             batch_size=batch_size,
-            specific_game_ids=specific_game_ids,
+            specific_game_ids=remaining_specific_game_ids,
             force_retry=force_retry,
         )
         selected_game_ids = selection["selected_game_ids"]
@@ -396,10 +412,10 @@ def _process_rotation_sync_queue_impl(
         quarantined_games += int(selection.get("quarantined_games", 0))
 
         for game_id in selected_game_ids:
-            metrics = _sync_game_rotation_for_game(game_id, run_id=run_id)
+            metrics = _sync_rotation_for_game(game_id, run_id=run_id)
             processed_games += 1
             payload_count += int(metrics.get("raw_payloads", 0))
-            successful = int(metrics.get("player_rotation_games", 0)) > 0
+            successful = bool(metrics.get("complete"))
             record_rotation_sync_attempt(
                 game_id,
                 season,
@@ -415,6 +431,12 @@ def _process_rotation_sync_queue_impl(
             rotation_stints_written += int(metrics.get("rotation_stints", 0))
             player_rotation_games_written += int(metrics.get("player_rotation_games", 0))
             team_rotation_games_written += int(metrics.get("team_rotation_games", 0))
+
+        if remaining_specific_game_ids is not None:
+            processed_specific_game_ids = {str(game_id) for game_id in selected_game_ids}
+            remaining_specific_game_ids = [
+                game_id for game_id in remaining_specific_game_ids if game_id not in processed_specific_game_ids
+            ]
 
     remaining_backlog_rows = get_rotation_backlog(season=season)
     if specific_game_ids is not None:
@@ -702,3 +724,45 @@ def get_current_mode() -> str:
     if STATUS_SCHEDULED in statuses:
         return "pregame"
     return "idle"
+
+
+def _sync_official_injury_report_impl(url: str, run_id: int | None = None) -> dict[str, Any]:
+    return sync_official_injury_report_impl(url)
+
+
+def sync_official_injury_report(url: str) -> dict[str, Any]:
+    return _run_logged_job("sync_official_injury_report", _sync_official_injury_report_impl, url)
+
+
+def _backfill_official_injury_reports_impl(
+    start_date: date,
+    end_date: date,
+    report_times: list[str] | None = None,
+    delay_seconds: float = 0.0,
+    run_id: int | None = None,
+) -> dict[str, Any]:
+    parsed_times = None
+    if report_times is not None:
+        parsed_times = [datetime.strptime(value, "%H:%M").time() for value in report_times]
+    return backfill_official_injury_reports_impl(
+        start_date=start_date,
+        end_date=end_date,
+        report_times=parsed_times,
+        delay_seconds=delay_seconds,
+    )
+
+
+def backfill_official_injury_reports(
+    start_date: date,
+    end_date: date,
+    report_times: list[str] | None = None,
+    delay_seconds: float = 0.0,
+) -> dict[str, Any]:
+    return _run_logged_job(
+        "backfill_official_injury_reports",
+        _backfill_official_injury_reports_impl,
+        start_date,
+        end_date,
+        report_times,
+        delay_seconds,
+    )

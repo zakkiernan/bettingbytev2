@@ -16,6 +16,8 @@ from database.models import (
     LivePlayerSnapshot,
     ModelSignal,
     OddsSnapshot,
+    OfficialInjuryReport,
+    OfficialInjuryReportEntry,
     Player,
     PlayerRotationGame,
     PlayerRotationStint,
@@ -111,6 +113,32 @@ def write_source_payloads(payloads: list[dict[str, Any]]) -> None:
             )
 
     logger.info("Inserted %s raw source payloads", len(payloads))
+
+
+def write_official_injury_report(report: dict[str, Any], entries: list[dict[str, Any]]) -> int:
+    with session_scope() as session:
+        existing = (
+            session.query(OfficialInjuryReport)
+            .filter(OfficialInjuryReport.pdf_url == report["pdf_url"])
+            .one_or_none()
+        )
+
+        if existing is None:
+            existing = OfficialInjuryReport(**report)
+            session.add(existing)
+            session.flush()
+        else:
+            for field, value in report.items():
+                setattr(existing, field, value)
+            session.flush()
+            session.query(OfficialInjuryReportEntry).filter(OfficialInjuryReportEntry.report_id == existing.id).delete()
+
+        report_id = int(existing.id)
+        for entry in entries:
+            session.add(OfficialInjuryReportEntry(report_id=report_id, **entry))
+
+    logger.info("Upserted official injury report %s with %s entries", report.get("pdf_url"), len(entries))
+    return report_id
 
 
 def write_teams(teams: list[dict[str, Any]]) -> None:

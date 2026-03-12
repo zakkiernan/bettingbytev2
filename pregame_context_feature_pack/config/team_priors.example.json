@@ -1,0 +1,19 @@
+{
+  "1610612737": {
+    "top7_player_ids": [203081, 1629027, 1629631],
+    "top9_player_ids": [203081, 1629027, 1629631, 1630168],
+    "high_usage_player_ids": [203081, 1629027],
+    "primary_ballhandler_ids": [203081],
+    "frontcourt_rotation_player_ids": [1630168],
+    "baseline_minutes_by_player_id": {
+      "203081": 35.2,
+      "1629027": 33.7,
+      "1630168": 28.1
+    },
+    "baseline_usage_by_player_id": {
+      "203081": 0.302,
+      "1629027": 0.271,
+      "1630168": 0.185
+    }
+  }
+}

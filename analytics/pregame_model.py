@@ -7,10 +7,11 @@ from statistics import NormalDist
 from typing import Any
 
 from analytics.features_pregame import PregamePointsFeatures, build_pregame_points_features
+from analytics.opportunity_model import project_pregame_opportunity
 from ingestion.writer import write_model_signals
 
 MODEL_NAME = "pregame_points_baseline"
-MODEL_VERSION = "v1"
+MODEL_VERSION = "v2"
 MIN_EDGE_TO_RECOMMEND = 1.0
 MIN_PROBABILITY_TO_RECOMMEND = 0.54
 MIN_CONFIDENCE_TO_RECOMMEND = 0.58
@@ -19,7 +20,6 @@ MIN_CONFIDENCE_TO_RECOMMEND = 0.58
 @dataclass(frozen=True, slots=True)
 class PregamePointsModelConfig:
     base_scoring_weights: tuple[tuple[float, str], ...] = ((0.50, "season_points_avg"), (0.30, "last10_points_avg"), (0.20, "last5_points_avg"))
-    expected_minutes_weights: tuple[tuple[float, str], ...] = ((0.50, "season_minutes_avg"), (0.30, "last10_minutes_avg"), (0.20, "last5_minutes_avg"))
     points_per_minute_weights: tuple[tuple[float, str, str], ...] = ((0.50, "season_points_avg", "season_minutes_avg"), (0.30, "last10_points_avg", "last10_minutes_avg"), (0.20, "last5_points_avg", "last5_minutes_avg"))
     recent_form_last5_factor: float = 0.25
     recent_form_last10_factor: float = 0.15
@@ -44,6 +44,13 @@ class PregamePointsModelConfig:
     rest_bonus_per_day: float = 0.15
     rest_bonus_max_days: int = 2
     context_clamp: float = 1.5
+    opportunity_confidence_weight: float = 0.30
+    sample_strength_weight: float = 0.16
+    points_stability_weight: float = 0.16
+    form_alignment_weight: float = 0.10
+    edge_strength_weight: float = 0.10
+    role_stability_weight: float = 0.10
+    minutes_trend_weight: float = 0.08
 
 
 DEFAULT_CONFIG = PregamePointsModelConfig()
@@ -60,7 +67,13 @@ class PregamePointsBreakdown:
     pace_adjustment: float
     context_adjustment: float
     expected_minutes: float
+    expected_usage_pct: float
+    expected_est_usage_pct: float
+    expected_touches: float
     points_per_minute: float
+    opportunity_score: float
+    opportunity_confidence: float
+    role_stability: float
     projected_points: float
 
     def to_dict(self) -> dict[str, float]:
@@ -126,10 +139,8 @@ class PregamePointsProjection:
         }
 
 
-
 def _value_or_zero(value: float | None) -> float:
     return float(value) if value is not None else 0.0
-
 
 
 def _weighted_average(weighted_values: list[tuple[float, float | None]]) -> float:
@@ -145,29 +156,29 @@ def _weighted_average(weighted_values: list[tuple[float, float | None]]) -> floa
     return numerator / denominator
 
 
-
 def _safe_points_per_minute(points: float | None, minutes: float | None) -> float | None:
     if points is None or minutes is None or minutes <= 0:
         return None
     return points / minutes
 
 
-
 def _clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(value, upper))
 
 
-
 def project_pregame_points(features: PregamePointsFeatures, config: PregamePointsModelConfig = DEFAULT_CONFIG) -> PregamePointsProjection:
+    opportunity_projection = project_pregame_opportunity(features)
+    opportunity = opportunity_projection.breakdown
+
     base_scoring = _weighted_average([
         (weight, getattr(features, attr))
         for weight, attr in config.base_scoring_weights
     ])
 
-    expected_minutes = _weighted_average([
-        (weight, getattr(features, attr))
-        for weight, attr in config.expected_minutes_weights
-    ])
+    expected_minutes = opportunity.expected_minutes
+    expected_usage_pct = opportunity.expected_usage_pct
+    expected_est_usage_pct = opportunity.expected_est_usage_pct
+    expected_touches = opportunity.expected_touches
 
     points_per_minute = _weighted_average([
         (weight, _safe_points_per_minute(getattr(features, points_attr), getattr(features, minutes_attr)))
@@ -189,16 +200,16 @@ def project_pregame_points(features: PregamePointsFeatures, config: PregamePoint
     minutes_adjustment = _clamp(minutes_adjustment, -config.minutes_clamp, config.minutes_clamp)
 
     usage_adjustment = 0.0
-    if features.last10_usage_pct is not None and features.season_usage_pct is not None:
-        usage_adjustment += (features.last10_usage_pct - features.season_usage_pct) * config.usage_delta_factor
-    if features.last10_est_usage_pct is not None and features.season_est_usage_pct is not None:
-        usage_adjustment += (features.last10_est_usage_pct - features.season_est_usage_pct) * config.estimated_usage_delta_factor
+    if features.season_usage_pct is not None:
+        usage_adjustment += (expected_usage_pct - features.season_usage_pct) * config.usage_delta_factor
+    if features.season_est_usage_pct is not None:
+        usage_adjustment += (expected_est_usage_pct - features.season_est_usage_pct) * config.estimated_usage_delta_factor
     if features.last10_fga_avg is not None and features.season_fga_avg is not None:
         usage_adjustment += (features.last10_fga_avg - features.season_fga_avg) * config.fga_delta_factor
     if features.last10_fta_avg is not None and features.season_fta_avg is not None:
         usage_adjustment += (features.last10_fta_avg - features.season_fta_avg) * config.fta_delta_factor
-    if features.last10_touches is not None and features.season_touches is not None:
-        usage_adjustment += (features.last10_touches - features.season_touches) * config.touches_delta_factor
+    if features.season_touches is not None:
+        usage_adjustment += (expected_touches - features.season_touches) * config.touches_delta_factor
     usage_adjustment = _clamp(usage_adjustment, -config.usage_clamp, config.usage_clamp)
 
     efficiency_adjustment = 0.0
@@ -257,23 +268,21 @@ def project_pregame_points(features: PregamePointsFeatures, config: PregamePoint
 
     sample_strength = _clamp(features.sample_size / 10.0, 0.0, 1.0)
     points_stability = 1.0 - _clamp(_value_or_zero(features.last10_points_std) / 12.0, 0.0, 1.0)
-    minutes_stability = 1.0 - _clamp(_value_or_zero(features.last10_minutes_std) / 8.0, 0.0, 1.0)
     recent_reference = features.last5_points_avg if features.last5_points_avg is not None else projected_points
     season_reference = features.season_points_avg if features.season_points_avg is not None else projected_points
     denominator = max(abs(season_reference), 8.0)
     form_alignment = 1.0 - _clamp(abs(recent_reference - season_reference) / denominator, 0.0, 1.0)
     edge_strength = _clamp(abs(edge_over) / 6.0, 0.0, 1.0)
-    role_security = _clamp((expected_minutes - 12.0) / 20.0, 0.0, 1.0)
     minutes_trend_volatility = 1.0 - _clamp(abs(_value_or_zero(features.last5_minutes_avg) - _value_or_zero(features.last10_minutes_avg)) / 6.0, 0.0, 1.0)
 
     confidence = _clamp(
-        0.24 * sample_strength
-        + 0.20 * points_stability
-        + 0.18 * minutes_stability
-        + 0.12 * form_alignment
-        + 0.08 * edge_strength
-        + 0.10 * role_security
-        + 0.08 * minutes_trend_volatility,
+        config.opportunity_confidence_weight * opportunity.confidence
+        + config.sample_strength_weight * sample_strength
+        + config.points_stability_weight * points_stability
+        + config.form_alignment_weight * form_alignment
+        + config.edge_strength_weight * edge_strength
+        + config.role_stability_weight * opportunity.role_stability
+        + config.minutes_trend_weight * minutes_trend_volatility,
         0.0,
         1.0,
     )
@@ -294,7 +303,13 @@ def project_pregame_points(features: PregamePointsFeatures, config: PregamePoint
         pace_adjustment=round(pace_adjustment, 3),
         context_adjustment=round(context_adjustment, 3),
         expected_minutes=round(expected_minutes, 3),
+        expected_usage_pct=round(expected_usage_pct, 4),
+        expected_est_usage_pct=round(expected_est_usage_pct, 4),
+        expected_touches=round(expected_touches, 3),
         points_per_minute=round(points_per_minute, 3),
+        opportunity_score=round(opportunity.opportunity_score, 4),
+        opportunity_confidence=round(opportunity.confidence, 4),
+        role_stability=round(opportunity.role_stability, 4),
         projected_points=round(projected_points, 3),
     )
 
@@ -310,7 +325,6 @@ def project_pregame_points(features: PregamePointsFeatures, config: PregamePoint
         confidence=round(confidence, 4),
         recommended_side=recommended_side,
     )
-
 
 
 def generate_pregame_points_signals(

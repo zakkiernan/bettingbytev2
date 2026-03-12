@@ -59,6 +59,8 @@ def infer_rotation_error_type(error_text: str | None) -> str | None:
         return "non_json_response"
     if "http 429" in normalized or "http 5" in normalized:
         return "http_429_or_5xx"
+    if "source missing game" in normalized or "page not found" in normalized:
+        return "source_missing_game"
     if "unexpected schema" in normalized or "missing expected result sets" in normalized or "response root was not a json object" in normalized:
         return "unexpected_schema"
     if "jsondecodeerror" in normalized or "invalid json" in normalized or "malformed json" in normalized or "expecting value" in normalized:
@@ -191,18 +193,19 @@ def _apply_pending_seed(state: RotationSyncState, season: str) -> None:
 def _apply_failure_seed(state: RotationSyncState, season: str, history: dict[str, Any]) -> None:
     consecutive_failures = int(history.get("consecutive_failures") or 0)
     last_attempted_at = history.get("last_attempted_at")
+    last_error_type = history.get("last_error_type")
 
     state.season = season
     state.attempt_count = max(int(state.attempt_count or 0), consecutive_failures)
     state.consecutive_failures = max(int(state.consecutive_failures or 0), consecutive_failures)
     state.last_attempted_at = last_attempted_at
     state.last_run_id = history.get("last_run_id")
-    state.last_error_type = history.get("last_error_type")
+    state.last_error_type = last_error_type
     state.last_error_text = history.get("last_error_text")
     if state.last_succeeded_at is None:
         state.last_succeeded_at = history.get("last_success_at")
 
-    if state.consecutive_failures >= ROTATION_SYNC_QUARANTINE_AFTER:
+    if last_error_type == "source_missing_game" or state.consecutive_failures >= ROTATION_SYNC_QUARANTINE_AFTER:
         state.status = ROTATION_SYNC_STATUS_QUARANTINED
         state.next_retry_at = None
     else:
@@ -411,9 +414,10 @@ def record_rotation_sync_attempt(
         state.consecutive_failures = int(state.consecutive_failures or 0) + 1
         state.last_error_type = error_type
         state.last_error_text = error_text
-        if state.consecutive_failures >= ROTATION_SYNC_QUARANTINE_AFTER:
+        if error_type == "source_missing_game" or state.consecutive_failures >= ROTATION_SYNC_QUARANTINE_AFTER:
             state.status = ROTATION_SYNC_STATUS_QUARANTINED
             state.next_retry_at = None
         else:
             state.status = ROTATION_SYNC_STATUS_RETRY
             state.next_retry_at = now + rotation_cooldown_for_failure_count(state.consecutive_failures)
+

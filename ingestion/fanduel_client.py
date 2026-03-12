@@ -182,7 +182,7 @@ def fetch_event_props(client: httpx.Client, event_id: str, stat_key: str) -> tup
         return None, []
 
 
-def build_event_mappings(fd_events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def build_event_mappings(fd_events: list[dict[str, Any]], captured_at: datetime) -> list[dict[str, Any]]:
     today_games, _ = get_todays_games_bundle()
     tomorrow_games, _ = get_todays_games_bundle(date.today() + timedelta(days=1))
     all_games = today_games + tomorrow_games
@@ -196,7 +196,7 @@ def build_event_mappings(fd_events: list[dict[str, Any]]) -> list[dict[str, Any]
                 "event_id": event["event_id"],
                 "event_name": event["event_name"],
                 "nba_game_id": matched_game["game_id"] if matched_game else None,
-                "captured_at": datetime.utcnow(),
+                "captured_at": captured_at,
             }
         )
     return event_mappings
@@ -206,9 +206,9 @@ def parse_event_props(
     event_mapping: dict[str, Any],
     raw_data: dict[str, Any],
     player_id_map: dict[str, str],
+    captured_at: datetime,
 ) -> list[dict[str, Any]]:
     props: list[dict[str, Any]] = []
-    captured_at = datetime.utcnow()
     markets = raw_data.get("attachments", {}).get("markets", {})
 
     for market in markets.values():
@@ -271,17 +271,18 @@ def parse_event_props(
     return props
 
 
-def fetch_current_prop_board() -> dict[str, list[dict[str, Any]]]:
+def fetch_current_prop_board() -> dict[str, Any]:
     player_id_map = get_player_id_map()
     payloads: list[dict[str, Any]] = []
+    captured_at = datetime.utcnow()
 
     with httpx.Client(headers=HEADERS, timeout=FANDUEL_REQUEST_TIMEOUT) as client:
         fd_events, schedule_payloads = fetch_nba_events(client)
         payloads.extend(schedule_payloads)
         if not fd_events:
-            return {"props": [], "event_mappings": [], "payloads": payloads}
+            return {"props": [], "event_mappings": [], "payloads": payloads, "captured_at": captured_at}
 
-        event_mappings = build_event_mappings(fd_events)
+        event_mappings = build_event_mappings(fd_events, captured_at=captured_at)
         event_mapping_by_id = {mapping["event_id"]: mapping for mapping in event_mappings}
 
         all_props: list[dict[str, Any]] = []
@@ -295,9 +296,9 @@ def fetch_current_prop_board() -> dict[str, list[dict[str, Any]]]:
                 payloads.extend(event_payloads)
                 if not raw_data:
                     continue
-                all_props.extend(parse_event_props(mapping, raw_data, player_id_map))
+                all_props.extend(parse_event_props(mapping, raw_data, player_id_map, captured_at=captured_at))
 
-    return {"props": all_props, "event_mappings": event_mappings, "payloads": payloads}
+    return {"props": all_props, "event_mappings": event_mappings, "payloads": payloads, "captured_at": captured_at}
 
 
 def scrape_props() -> list[dict[str, Any]]:

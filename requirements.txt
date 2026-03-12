@@ -4,9 +4,13 @@ sqlalchemy
 pydantic
 python-dotenv
 httpx
+requests
+beautifulsoup4
 pytest
 nba_api
 passlib[bcrypt]
 python-jose[cryptography]
 apscheduler
 alembic
+lxml
+pypdf==6.8.0

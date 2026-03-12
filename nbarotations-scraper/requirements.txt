@@ -1,0 +1,7 @@
+scrapling
+requests
+beautifulsoup4
+lxml
+curl-cffi
+playwright
+browserforge
