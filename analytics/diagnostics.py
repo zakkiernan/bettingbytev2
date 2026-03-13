@@ -23,6 +23,14 @@ class PregamePointsMissAnalysis:
     top_miss_count: int
     buckets: list[PregamePointsMissBucket]
     examples: list[dict[str, object]]
+    pregame_context_attached_count: int = 0
+    pregame_context_missing_count: int = 0
+    line_available_count: int = 0
+    line_missing_count: int = 0
+    with_pregame_context_buckets: list[PregamePointsMissBucket] | None = None
+    without_pregame_context_buckets: list[PregamePointsMissBucket] | None = None
+    with_line_buckets: list[PregamePointsMissBucket] | None = None
+    without_line_buckets: list[PregamePointsMissBucket] | None = None
 
 
 @dataclass(slots=True)
@@ -37,6 +45,10 @@ class PregameOpportunityMissAnalysis:
     top_miss_count: int
     buckets: list[PregameOpportunityMissBucket]
     examples: list[dict[str, object]]
+    pregame_context_attached_count: int = 0
+    pregame_context_missing_count: int = 0
+    with_pregame_context_buckets: list[PregameOpportunityMissBucket] | None = None
+    without_pregame_context_buckets: list[PregameOpportunityMissBucket] | None = None
 
 
 def _classify_row(row: PregamePointsBacktestRow) -> str:
@@ -88,6 +100,14 @@ def analyze_pregame_points_misses(result: PregamePointsBacktestResult, *, top_n:
         PregamePointsMissBucket(label=label, count=count, pct=round(count / len(rows), 4) if rows else 0.0)
         for label, count in counts.most_common()
     ]
+    with_context_rows = [row for row in rows if getattr(row, "pregame_context_attached", False)]
+    without_context_rows = [row for row in rows if not getattr(row, "pregame_context_attached", False)]
+    with_line_rows = [row for row in rows if getattr(row, "line_available", False)]
+    without_line_rows = [row for row in rows if not getattr(row, "line_available", False)]
+    with_context_counts = Counter(_classify_row(row) for row in with_context_rows)
+    without_context_counts = Counter(_classify_row(row) for row in without_context_rows)
+    with_line_counts = Counter(_classify_row(row) for row in with_line_rows)
+    without_line_counts = Counter(_classify_row(row) for row in without_line_rows)
     examples = []
     for row in rows[:25]:
         examples.append(
@@ -100,10 +120,36 @@ def analyze_pregame_points_misses(result: PregamePointsBacktestResult, *, top_n:
                 "actual_minutes": row.actual_minutes,
                 "expected_minutes": row.expected_minutes,
                 "error": row.error,
+                "pregame_context_attached": bool(getattr(row, "pregame_context_attached", False)),
+                "line_available": bool(getattr(row, "line_available", False)),
                 "category": _classify_row(row),
             }
         )
-    return PregamePointsMissAnalysis(top_miss_count=len(rows), buckets=buckets, examples=examples)
+    return PregamePointsMissAnalysis(
+        top_miss_count=len(rows),
+        buckets=buckets,
+        examples=examples,
+        pregame_context_attached_count=len(with_context_rows),
+        pregame_context_missing_count=len(without_context_rows),
+        line_available_count=len(with_line_rows),
+        line_missing_count=len(without_line_rows),
+        with_pregame_context_buckets=[
+            PregamePointsMissBucket(label=label, count=count, pct=round(count / len(with_context_rows), 4) if with_context_rows else 0.0)
+            for label, count in with_context_counts.most_common()
+        ],
+        without_pregame_context_buckets=[
+            PregamePointsMissBucket(label=label, count=count, pct=round(count / len(without_context_rows), 4) if without_context_rows else 0.0)
+            for label, count in without_context_counts.most_common()
+        ],
+        with_line_buckets=[
+            PregamePointsMissBucket(label=label, count=count, pct=round(count / len(with_line_rows), 4) if with_line_rows else 0.0)
+            for label, count in with_line_counts.most_common()
+        ],
+        without_line_buckets=[
+            PregamePointsMissBucket(label=label, count=count, pct=round(count / len(without_line_rows), 4) if without_line_rows else 0.0)
+            for label, count in without_line_counts.most_common()
+        ],
+    )
 
 
 def analyze_pregame_opportunity_misses(
@@ -121,6 +167,10 @@ def analyze_pregame_opportunity_misses(
         PregameOpportunityMissBucket(label=label, count=count, pct=round(count / len(rows), 4) if rows else 0.0)
         for label, count in counts.most_common()
     ]
+    with_context_rows = [row for row in rows if getattr(row, "pregame_context_attached", False)]
+    without_context_rows = [row for row in rows if not getattr(row, "pregame_context_attached", False)]
+    with_context_counts = Counter(_classify_opportunity_row(row) for row in with_context_rows)
+    without_context_counts = Counter(_classify_opportunity_row(row) for row in without_context_rows)
     examples = []
     for row in rows[:25]:
         examples.append(
@@ -141,7 +191,22 @@ def analyze_pregame_opportunity_misses(
                 "official_injury_status": getattr(row, "official_injury_status", None),
                 "official_teammate_out_count": getattr(row, "official_teammate_out_count", None),
                 "late_scratch_risk": getattr(row, "late_scratch_risk", None),
+                "pregame_context_attached": bool(getattr(row, "pregame_context_attached", False)),
                 "category": _classify_opportunity_row(row),
             }
         )
-    return PregameOpportunityMissAnalysis(top_miss_count=len(rows), buckets=buckets, examples=examples)
+    return PregameOpportunityMissAnalysis(
+        top_miss_count=len(rows),
+        buckets=buckets,
+        examples=examples,
+        pregame_context_attached_count=len(with_context_rows),
+        pregame_context_missing_count=len(without_context_rows),
+        with_pregame_context_buckets=[
+            PregameOpportunityMissBucket(label=label, count=count, pct=round(count / len(with_context_rows), 4) if with_context_rows else 0.0)
+            for label, count in with_context_counts.most_common()
+        ],
+        without_pregame_context_buckets=[
+            PregameOpportunityMissBucket(label=label, count=count, pct=round(count / len(without_context_rows), 4) if without_context_rows else 0.0)
+            for label, count in without_context_counts.most_common()
+        ],
+    )

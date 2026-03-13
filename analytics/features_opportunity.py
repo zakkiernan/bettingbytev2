@@ -1,17 +1,28 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from statistics import mean, median, pstdev
 from typing import Any
 
+from sqlalchemy.orm import Session
+
 from analytics.injury_report_loader import (
+    OfficialInjuryReportIndex,
     build_official_injury_report_index,
+    get_official_team_rows,
     get_official_team_summary,
     load_latest_official_injury_report_rows,
     match_official_injury_row,
 )
-from analytics.pregame_context_loader import build_pregame_context_index, load_pregame_context_feature_rows, match_pregame_context_row
+from analytics.pregame_context_loader import (
+    PregameContextIndex,
+    build_pregame_context_index,
+    load_pregame_context_feature_rows,
+    load_pregame_context_snapshot_rows,
+    match_pregame_context_row,
+)
 from database.db import session_scope
 from database.models import (
     Game,
@@ -22,6 +33,34 @@ from database.models import (
     Team,
     TeamDefensiveStat,
 )
+
+
+@dataclass(slots=True)
+class TeamRolePrior:
+    team_id: str
+    team_abbreviation: str
+    top7_player_ids: set[str]
+    top9_player_ids: set[str]
+    high_usage_player_ids: set[str]
+    primary_ballhandler_ids: set[str]
+    baseline_minutes_by_player_id: dict[str, float]
+    baseline_usage_by_player_id: dict[str, float]
+
+
+@dataclass(slots=True)
+class PregameFeatureRequest:
+    game_id: str
+    player_id: str
+    player_name: str
+    stat_type: str
+    captured_at: datetime
+    line: float = 0.0
+    over_odds: int = 0
+    under_odds: int = 0
+    game_date: datetime | None = None
+    team_abbreviation: str | None = None
+    opponent_abbreviation: str | None = None
+    is_home: bool | None = None
 
 
 @dataclass(slots=True)
@@ -102,6 +141,7 @@ class PregameOpportunityFeatures:
     projected_lineup_confirmed: bool | None = None
     official_starter_flag: bool | None = None
     pregame_context_confidence: float | None = None
+    pregame_context_attached: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -134,6 +174,8 @@ class PregameFeatureSeed:
     pregame_context_row: dict[str, Any] | None = None
     official_injury_row: dict[str, Any] | None = None
     official_injury_team_summary: dict[str, Any] | None = None
+    official_injury_team_rows: list[dict[str, Any]] | None = None
+    team_role_prior: TeamRolePrior | None = None
 
     def build_opportunity_features(self) -> PregameOpportunityFeatures:
         context_aggregates = _merge_context_aggregates(
@@ -141,6 +183,9 @@ class PregameFeatureSeed:
             _build_official_injury_aggregates(
                 self.official_injury_row,
                 self.official_injury_team_summary,
+                team_rows=self.official_injury_team_rows,
+                team_role_prior=self.team_role_prior,
+                player_id=self.player_id,
                 captured_at=self.captured_at,
             ),
         )
@@ -164,6 +209,7 @@ class PregameFeatureSeed:
             league_avg_def_rating=self.league_avg_def_rating,
             league_avg_pace=self.league_avg_pace,
             league_avg_opponent_points=self.league_avg_opponent_points,
+            pregame_context_attached=self.pregame_context_row is not None,
             **_build_shared_log_aggregates(self.recent_logs),
             **_build_rotation_aggregates(self.rotation_rows),
             **_build_shared_advanced_aggregates(self.advanced_rows),
@@ -212,11 +258,32 @@ def _weighted_average(weighted_values: list[tuple[float, float | None]]) -> floa
     return numerator / denominator
 
 
-def _resolve_team_context(snapshot: PlayerPropSnapshot, game: Game | None, latest_log: HistoricalGameLog | None) -> tuple[str | None, str | None, bool | None]:
-    candidate_team = snapshot.team or (latest_log.team if latest_log else None)
-    candidate_opponent = snapshot.opponent or (latest_log.opponent if latest_log else None)
+def _season_from_game_date(game_date: datetime | None) -> str | None:
+    if game_date is None:
+        return None
+    if game_date.month >= 10:
+        return f"{game_date.year}-{str(game_date.year + 1)[-2:]}"
+    return f"{game_date.year - 1}-{str(game_date.year)[-2:]}"
 
+
+def _sort_logs_desc(rows: list[HistoricalGameLog]) -> list[HistoricalGameLog]:
+    return sorted(
+        [row for row in rows if row.game_date is not None],
+        key=lambda row: (row.game_date, row.game_id),
+        reverse=True,
+    )
+
+
+def _resolve_team_context(
+    candidate_team: str | None,
+    candidate_opponent: str | None,
+    game: Game | None,
+    latest_log: HistoricalGameLog | None,
+    request_is_home: bool | None = None,
+) -> tuple[str | None, str | None, bool | None]:
     if game is None:
+        if request_is_home is not None:
+            return candidate_team, candidate_opponent, request_is_home
         return candidate_team, candidate_opponent, latest_log.is_home if latest_log else None
 
     home = game.home_team_abbreviation
@@ -235,7 +302,35 @@ def _resolve_team_context(snapshot: PlayerPropSnapshot, game: Game | None, lates
         opponent = away if latest_log.team == home else home
         return latest_log.team, opponent, latest_log.team == home
 
-    return candidate_team, candidate_opponent, latest_log.is_home if latest_log else None
+    return candidate_team, candidate_opponent, request_is_home if request_is_home is not None else latest_log.is_home if latest_log else None
+
+
+def _build_defense_context(
+    team_defense_rows: list[TeamDefensiveStat],
+) -> tuple[
+    dict[tuple[str, str], TeamDefensiveStat],
+    dict[str, float | None],
+    dict[str, float | None],
+    dict[str, float | None],
+]:
+    defense_by_season_team: dict[tuple[str, str], TeamDefensiveStat] = {}
+    def_rating_by_season: dict[str, list[float]] = defaultdict(list)
+    pace_by_season: dict[str, list[float]] = defaultdict(list)
+    opp_points_by_season: dict[str, list[float]] = defaultdict(list)
+
+    for row in team_defense_rows:
+        defense_by_season_team[(row.season, row.team_id)] = row
+        if row.defensive_rating is not None:
+            def_rating_by_season[row.season].append(float(row.defensive_rating))
+        if row.pace is not None:
+            pace_by_season[row.season].append(float(row.pace))
+        if row.opponent_points_per_game is not None:
+            opp_points_by_season[row.season].append(float(row.opponent_points_per_game))
+
+    league_avg_def_rating = {season: _mean(values) for season, values in def_rating_by_season.items()}
+    league_avg_pace = {season: _mean(values) for season, values in pace_by_season.items()}
+    league_avg_opponent_points = {season: _mean(values) for season, values in opp_points_by_season.items()}
+    return defense_by_season_team, league_avg_def_rating, league_avg_pace, league_avg_opponent_points
 
 
 def _build_shared_log_aggregates(logs: list[HistoricalGameLog]) -> dict[str, float | int | None]:
@@ -308,10 +403,294 @@ def _build_shared_advanced_aggregates(rows: list[HistoricalAdvancedLog]) -> dict
     }
 
 
+def _build_team_role_prior_from_rows(
+    *,
+    team_id: str,
+    team_abbreviation: str,
+    logs: list[HistoricalGameLog],
+    advanced_rows: list[HistoricalAdvancedLog],
+    rotation_rows: list[PlayerRotationGame],
+) -> TeamRolePrior | None:
+    if not logs:
+        return None
+
+    minutes_by_player: dict[str, list[float]] = defaultdict(list)
+    usage_by_player: dict[str, list[float]] = defaultdict(list)
+    passes_by_player: dict[str, list[float]] = defaultdict(list)
+    touches_by_player: dict[str, list[float]] = defaultdict(list)
+    start_flags_by_player: dict[str, list[float]] = defaultdict(list)
+    close_flags_by_player: dict[str, list[float]] = defaultdict(list)
+
+    for log in logs:
+        if log.minutes is not None:
+            minutes_by_player[log.player_id].append(float(log.minutes))
+
+    for row in advanced_rows:
+        if row.usage_percentage is not None:
+            usage_by_player[row.player_id].append(float(row.usage_percentage))
+        if row.passes is not None:
+            passes_by_player[row.player_id].append(float(row.passes))
+        if row.touches is not None:
+            touches_by_player[row.player_id].append(float(row.touches))
+
+    for row in rotation_rows:
+        if row.started is not None:
+            start_flags_by_player[row.player_id].append(1.0 if row.started else 0.0)
+        if row.closed_game is not None:
+            close_flags_by_player[row.player_id].append(1.0 if row.closed_game else 0.0)
+
+    player_ids = sorted(minutes_by_player.keys())
+    if not player_ids:
+        return None
+
+    baseline_minutes = {player_id: _mean(values) or 0.0 for player_id, values in minutes_by_player.items()}
+    baseline_usage = {player_id: _mean(values) or 0.0 for player_id, values in usage_by_player.items()}
+    baseline_passes = {player_id: _mean(values) or 0.0 for player_id, values in passes_by_player.items()}
+    baseline_touches = {player_id: _mean(values) or 0.0 for player_id, values in touches_by_player.items()}
+    start_rates = {player_id: _mean(values) or 0.0 for player_id, values in start_flags_by_player.items()}
+    close_rates = {player_id: _mean(values) or 0.0 for player_id, values in close_flags_by_player.items()}
+
+    role_rank = sorted(
+        player_ids,
+        key=lambda player_id: (
+            baseline_minutes.get(player_id, 0.0)
+            + 4.0 * start_rates.get(player_id, 0.0)
+            + 2.0 * close_rates.get(player_id, 0.0),
+            baseline_usage.get(player_id, 0.0),
+        ),
+        reverse=True,
+    )
+    usage_rank = sorted(player_ids, key=lambda player_id: baseline_usage.get(player_id, 0.0), reverse=True)
+    ballhandler_rank = sorted(
+        player_ids,
+        key=lambda player_id: (baseline_passes.get(player_id, 0.0) * 0.7) + (baseline_touches.get(player_id, 0.0) * 0.3),
+        reverse=True,
+    )
+
+    return TeamRolePrior(
+        team_id=team_id,
+        team_abbreviation=team_abbreviation,
+        top7_player_ids=set(role_rank[:7]),
+        top9_player_ids=set(role_rank[:9]),
+        high_usage_player_ids=set(usage_rank[: min(4, len(usage_rank))]),
+        primary_ballhandler_ids=set(ballhandler_rank[: min(2, len(ballhandler_rank))]),
+        baseline_minutes_by_player_id=baseline_minutes,
+        baseline_usage_by_player_id=baseline_usage,
+    )
+
+
+def _load_recent_team_game_ids(
+    logs: list[HistoricalGameLog],
+    *,
+    cutoff: datetime | None,
+    lookback_games: int,
+) -> list[str]:
+    game_ids: list[str] = []
+    seen: set[str] = set()
+    for log in _sort_logs_desc(logs):
+        if cutoff is not None and log.game_date >= cutoff:
+            continue
+        if log.game_id in seen:
+            continue
+        seen.add(log.game_id)
+        game_ids.append(log.game_id)
+        if len(game_ids) >= lookback_games:
+            break
+    return game_ids
+
+
+def load_team_role_prior(
+    session: Session,
+    *,
+    team_id: str | None,
+    team_abbreviation: str | None,
+    cutoff: datetime | None,
+    cache: dict[tuple[str, str], TeamRolePrior | None] | None = None,
+    lookback_games: int = 20,
+    logs_by_team: dict[str, list[HistoricalGameLog]] | None = None,
+    advanced_by_player_game: dict[tuple[str, str], HistoricalAdvancedLog] | None = None,
+    rotation_by_team_game_player: dict[tuple[str, str, str], PlayerRotationGame] | None = None,
+) -> TeamRolePrior | None:
+    resolved_team_abbr = (team_abbreviation or "").upper()
+    resolved_team_id = str(team_id) if team_id else ""
+    cache_key = (resolved_team_id or resolved_team_abbr, cutoff.isoformat() if cutoff is not None else "")
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
+
+    if not resolved_team_abbr and resolved_team_id:
+        team = session.get(Team, resolved_team_id)
+        resolved_team_abbr = (team.abbreviation if team and team.abbreviation else "").upper()
+    if not resolved_team_id and resolved_team_abbr:
+        team = session.query(Team).filter(Team.abbreviation == resolved_team_abbr).one_or_none()
+        resolved_team_id = str(team.team_id) if team is not None else ""
+    if not resolved_team_abbr:
+        return None
+
+    if logs_by_team is not None:
+        team_logs_pool = list(logs_by_team.get(resolved_team_abbr, []))
+    else:
+        query = session.query(HistoricalGameLog).filter(HistoricalGameLog.team == resolved_team_abbr)
+        if cutoff is not None:
+            query = query.filter(HistoricalGameLog.game_date < cutoff)
+        team_logs_pool = query.all()
+
+    recent_game_ids = _load_recent_team_game_ids(team_logs_pool, cutoff=cutoff, lookback_games=lookback_games)
+    if not recent_game_ids:
+        if cache is not None:
+            cache[cache_key] = None
+        return None
+
+    recent_game_id_set = set(recent_game_ids)
+    team_logs = [log for log in team_logs_pool if log.game_id in recent_game_id_set]
+
+    if advanced_by_player_game is not None:
+        advanced_rows = [
+            row
+            for (player_id, game_id), row in advanced_by_player_game.items()
+            if game_id in recent_game_id_set and player_id in {log.player_id for log in team_logs}
+        ]
+    else:
+        advanced_rows = (
+            session.query(HistoricalAdvancedLog)
+            .filter(
+                HistoricalAdvancedLog.game_id.in_(recent_game_ids),
+                HistoricalAdvancedLog.player_id.in_([log.player_id for log in team_logs]),
+            )
+            .all()
+        )
+
+    if rotation_by_team_game_player is not None and resolved_team_id:
+        rotation_rows = [
+            row
+            for (row_team_id, game_id, _player_id), row in rotation_by_team_game_player.items()
+            if row_team_id == resolved_team_id and game_id in recent_game_id_set
+        ]
+    elif resolved_team_id:
+        rotation_rows = (
+            session.query(PlayerRotationGame)
+            .filter(PlayerRotationGame.team_id == resolved_team_id, PlayerRotationGame.game_id.in_(recent_game_ids))
+            .all()
+        )
+    else:
+        rotation_rows = []
+
+    prior = _build_team_role_prior_from_rows(
+        team_id=resolved_team_id,
+        team_abbreviation=resolved_team_abbr,
+        logs=team_logs,
+        advanced_rows=advanced_rows,
+        rotation_rows=rotation_rows,
+    )
+    if cache is not None:
+        cache[cache_key] = prior
+    return prior
+
+
+def build_team_role_priors(
+    *,
+    cutoff: datetime | None = None,
+    team_ids: set[str] | None = None,
+    lookback_games: int = 20,
+) -> dict[str, TeamRolePrior]:
+    with session_scope() as session:
+        teams = session.query(Team).all()
+        selected_teams = [team for team in teams if not team_ids or str(team.team_id) in team_ids]
+        priors: dict[str, TeamRolePrior] = {}
+        cache: dict[tuple[str, str], TeamRolePrior | None] = {}
+        for team in selected_teams:
+            prior = load_team_role_prior(
+                session,
+                team_id=str(team.team_id),
+                team_abbreviation=team.abbreviation,
+                cutoff=cutoff,
+                cache=cache,
+                lookback_games=lookback_games,
+            )
+            if prior is not None:
+                priors[prior.team_id] = prior
+        return priors
+
+
+def _build_role_based_official_injury_context(
+    team_rows: list[dict[str, Any]] | None,
+    team_role_prior: TeamRolePrior | None,
+    *,
+    player_id: str | None,
+) -> dict[str, Any]:
+    base = {
+        "teammate_out_count_top7": None,
+        "teammate_out_count_top9": None,
+        "missing_high_usage_teammates": None,
+        "missing_primary_ballhandler": None,
+        "missing_frontcourt_rotation_piece": None,
+        "vacated_minutes_proxy": None,
+        "vacated_usage_proxy": None,
+    }
+    if not team_rows or team_role_prior is None:
+        return base
+
+    severity_by_status = {
+        "OUT": 1.0,
+        "SUSPENDED": 1.0,
+        "DOUBTFUL": 0.7,
+        "QUESTIONABLE": 0.35,
+        "PROBABLE": 0.1,
+    }
+    teammate_out_count_top7 = 0.0
+    teammate_out_count_top9 = 0.0
+    missing_high_usage_teammates = 0.0
+    missing_primary_ballhandler = False
+    vacated_minutes_proxy = 0.0
+    vacated_usage_proxy = 0.0
+    saw_role_signal = False
+
+    for row in team_rows:
+        teammate_id = row.get("player_id")
+        if player_id and teammate_id is not None and str(teammate_id) == str(player_id):
+            continue
+        status = str(row.get("current_status") or "").upper()
+        severity = severity_by_status.get(status)
+        if severity is None or teammate_id in (None, ""):
+            continue
+
+        teammate_key = str(teammate_id)
+        if teammate_key in team_role_prior.top7_player_ids:
+            teammate_out_count_top7 += severity
+            saw_role_signal = True
+        if teammate_key in team_role_prior.top9_player_ids:
+            teammate_out_count_top9 += severity
+            saw_role_signal = True
+        if teammate_key in team_role_prior.high_usage_player_ids:
+            missing_high_usage_teammates += severity
+            saw_role_signal = True
+        if teammate_key in team_role_prior.primary_ballhandler_ids and severity >= 0.35:
+            missing_primary_ballhandler = True
+            saw_role_signal = True
+
+        vacated_minutes_proxy += team_role_prior.baseline_minutes_by_player_id.get(teammate_key, 0.0) * severity
+        vacated_usage_proxy += team_role_prior.baseline_usage_by_player_id.get(teammate_key, 0.0) * severity
+
+    if not saw_role_signal and vacated_minutes_proxy <= 0.0 and vacated_usage_proxy <= 0.0:
+        return base
+
+    return {
+        "teammate_out_count_top7": round(teammate_out_count_top7, 4),
+        "teammate_out_count_top9": round(teammate_out_count_top9, 4),
+        "missing_high_usage_teammates": round(missing_high_usage_teammates, 4),
+        "missing_primary_ballhandler": missing_primary_ballhandler,
+        "missing_frontcourt_rotation_piece": None,
+        "vacated_minutes_proxy": round(vacated_minutes_proxy, 4) if vacated_minutes_proxy > 0.0 else None,
+        "vacated_usage_proxy": round(vacated_usage_proxy, 4) if vacated_usage_proxy > 0.0 else None,
+    }
+
+
 def _build_official_injury_aggregates(
     row: dict[str, Any] | None,
     team_summary: dict[str, Any] | None,
     *,
+    team_rows: list[dict[str, Any]] | None = None,
+    team_role_prior: TeamRolePrior | None = None,
+    player_id: str | None = None,
     captured_at: datetime,
 ) -> dict[str, Any]:
     base = {
@@ -325,9 +704,14 @@ def _build_official_injury_aggregates(
         "late_scratch_risk": None,
         "teammate_out_count_top7": None,
         "teammate_out_count_top9": None,
+        "missing_high_usage_teammates": None,
+        "missing_primary_ballhandler": None,
+        "missing_frontcourt_rotation_piece": None,
+        "vacated_minutes_proxy": None,
+        "vacated_usage_proxy": None,
         "pregame_context_confidence": None,
     }
-    if row is None and team_summary is None:
+    if row is None and team_summary is None and not team_rows:
         return base
 
     report_datetime = None
@@ -335,25 +719,35 @@ def _build_official_injury_aggregates(
         report_datetime = row.get("report_datetime_utc")
     if report_datetime is None and team_summary is not None:
         report_datetime = team_summary.get("report_datetime_utc")
+    if report_datetime is None and team_rows:
+        report_datetime = max(
+            [candidate.get("report_datetime_utc") for candidate in team_rows if candidate.get("report_datetime_utc") is not None],
+            default=None,
+        )
 
     confidence = None
     if isinstance(report_datetime, datetime):
         age_hours = max((captured_at - report_datetime).total_seconds() / 3600.0, 0.0)
         confidence = max(0.35, min(0.92, 0.92 - 0.06 * age_hours))
-    elif row is not None or team_summary is not None:
+    elif row is not None or team_summary is not None or team_rows:
         confidence = 0.5
 
     if team_summary is not None:
-        out_count = float(team_summary.get("out_count") or 0.0)
-        doubtful_count = float(team_summary.get("doubtful_count") or 0.0)
-        questionable_count = float(team_summary.get("questionable_count") or 0.0)
-        base["official_teammate_out_count"] = out_count
-        base["official_teammate_doubtful_count"] = doubtful_count
-        base["official_teammate_questionable_count"] = questionable_count
+        base["official_teammate_out_count"] = float(team_summary.get("out_count") or 0.0)
+        base["official_teammate_doubtful_count"] = float(team_summary.get("doubtful_count") or 0.0)
+        base["official_teammate_questionable_count"] = float(team_summary.get("questionable_count") or 0.0)
+
+    role_context = _build_role_based_official_injury_context(team_rows, team_role_prior, player_id=player_id)
+    base.update(role_context)
 
     if row is None:
         base["official_report_datetime_utc"] = report_datetime
-        base["pregame_context_confidence"] = min(float(confidence), 0.25) if confidence is not None else 0.25
+        if confidence is None:
+            base["pregame_context_confidence"] = 0.25 if team_summary is not None else None
+        elif role_context.get("vacated_minutes_proxy") is not None or role_context.get("missing_primary_ballhandler"):
+            base["pregame_context_confidence"] = min(float(confidence), 0.65)
+        else:
+            base["pregame_context_confidence"] = min(float(confidence), 0.25)
         return base
 
     status = str(row.get("current_status") or "").upper()
@@ -384,9 +778,27 @@ def _build_official_injury_aggregates(
 
 def _merge_context_aggregates(primary: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
     merged = dict(fallback)
-    merged.update({key: value for key, value in primary.items() if key not in {"late_scratch_risk", "pregame_context_confidence", "teammate_out_count_top7", "teammate_out_count_top9"}})
+    merged.update(
+        {
+            key: value
+            for key, value in primary.items()
+            if key not in {"late_scratch_risk", "pregame_context_confidence", "teammate_out_count_top7", "teammate_out_count_top9"}
+        }
+    )
 
-    for key in ("official_available", "projected_available", "expected_start", "starter_confidence", "missing_high_usage_teammates", "missing_primary_ballhandler", "missing_frontcourt_rotation_piece", "vacated_minutes_proxy", "vacated_usage_proxy", "projected_lineup_confirmed", "official_starter_flag"):
+    for key in (
+        "official_available",
+        "projected_available",
+        "expected_start",
+        "starter_confidence",
+        "missing_high_usage_teammates",
+        "missing_primary_ballhandler",
+        "missing_frontcourt_rotation_piece",
+        "vacated_minutes_proxy",
+        "vacated_usage_proxy",
+        "projected_lineup_confirmed",
+        "official_starter_flag",
+    ):
         primary_value = primary.get(key)
         if primary_value is not None:
             merged[key] = primary_value
@@ -418,6 +830,13 @@ def _merge_context_aggregates(primary: dict[str, Any], fallback: dict[str, Any])
             merged[key] = primary_value
         else:
             merged[key] = max(float(primary_value), float(fallback_value))
+
+    if fallback.get("official_available") is False:
+        merged["official_available"] = False
+        merged["projected_available"] = False
+        merged["expected_start"] = False
+        merged["starter_confidence"] = 0.0
+        merged["official_starter_flag"] = False
 
     return merged
 
@@ -461,7 +880,220 @@ def _build_pregame_context_aggregates(row: dict[str, Any] | None) -> dict[str, f
     }
 
 
-def load_pregame_feature_seeds(captured_at: datetime | None = None, stat_type: str = "points", limit: int | None = None) -> list[PregameFeatureSeed]:
+def _load_recent_player_logs(
+    session: Session,
+    *,
+    player_id: str,
+    cutoff: datetime | None,
+    history_limit: int,
+    logs_by_player: dict[str, list[HistoricalGameLog]] | None = None,
+) -> list[HistoricalGameLog]:
+    if logs_by_player is not None:
+        candidate_logs = _sort_logs_desc(logs_by_player.get(player_id, []))
+        if cutoff is not None:
+            candidate_logs = [log for log in candidate_logs if log.game_date < cutoff]
+        return candidate_logs[:history_limit]
+
+    query = session.query(HistoricalGameLog).filter(HistoricalGameLog.player_id == player_id)
+    if cutoff is not None:
+        query = query.filter(HistoricalGameLog.game_date < cutoff)
+    return (
+        query.order_by(HistoricalGameLog.game_date.desc(), HistoricalGameLog.game_id.desc())
+        .limit(history_limit)
+        .all()
+    )
+
+
+def _load_player_advanced_rows(
+    session: Session,
+    *,
+    player_id: str,
+    recent_logs: list[HistoricalGameLog],
+    advanced_by_player_game: dict[tuple[str, str], HistoricalAdvancedLog] | None = None,
+) -> list[HistoricalAdvancedLog]:
+    game_ids = [log.game_id for log in recent_logs]
+    if not game_ids:
+        return []
+    if advanced_by_player_game is not None:
+        return [advanced_by_player_game[(player_id, log.game_id)] for log in recent_logs if (player_id, log.game_id) in advanced_by_player_game]
+
+    advanced_by_game = {
+        row.game_id: row
+        for row in session.query(HistoricalAdvancedLog)
+        .filter(HistoricalAdvancedLog.player_id == player_id, HistoricalAdvancedLog.game_id.in_(game_ids))
+        .all()
+    }
+    return [advanced_by_game[log.game_id] for log in recent_logs if log.game_id in advanced_by_game]
+
+
+def _load_player_rotation_rows(
+    session: Session,
+    *,
+    player_id: str,
+    recent_logs: list[HistoricalGameLog],
+    rotation_by_player_game: dict[tuple[str, str], PlayerRotationGame] | None = None,
+) -> list[PlayerRotationGame]:
+    game_ids = [log.game_id for log in recent_logs]
+    if not game_ids:
+        return []
+    if rotation_by_player_game is not None:
+        return [rotation_by_player_game[(player_id, log.game_id)] for log in recent_logs if (player_id, log.game_id) in rotation_by_player_game]
+
+    rotation_by_game = {
+        row.game_id: row
+        for row in session.query(PlayerRotationGame)
+        .filter(PlayerRotationGame.player_id == player_id, PlayerRotationGame.game_id.in_(game_ids))
+        .all()
+    }
+    return [rotation_by_game[log.game_id] for log in recent_logs if log.game_id in rotation_by_game]
+
+
+def build_pregame_feature_seed(
+    session: Session,
+    request: PregameFeatureRequest,
+    *,
+    games_by_id: dict[str, Game] | None = None,
+    team_id_by_abbreviation: dict[str, str] | None = None,
+    defense_by_season_team: dict[tuple[str, str], TeamDefensiveStat] | None = None,
+    league_avg_def_rating_by_season: dict[str, float | None] | None = None,
+    league_avg_pace_by_season: dict[str, float | None] | None = None,
+    league_avg_opponent_points_by_season: dict[str, float | None] | None = None,
+    pregame_context_index: PregameContextIndex | None = None,
+    official_injury_index: OfficialInjuryReportIndex | None = None,
+    team_role_prior_cache: dict[tuple[str, str], TeamRolePrior | None] | None = None,
+    logs_by_player: dict[str, list[HistoricalGameLog]] | None = None,
+    advanced_by_player_game: dict[tuple[str, str], HistoricalAdvancedLog] | None = None,
+    rotation_by_player_game: dict[tuple[str, str], PlayerRotationGame] | None = None,
+    logs_by_team: dict[str, list[HistoricalGameLog]] | None = None,
+    rotation_by_team_game_player: dict[tuple[str, str, str], PlayerRotationGame] | None = None,
+    history_limit: int = 15,
+) -> PregameFeatureSeed | None:
+    game = games_by_id.get(request.game_id) if games_by_id is not None else session.get(Game, request.game_id)
+    cutoff = request.game_date or (game.game_time_utc if game and game.game_time_utc else None) or (game.game_date if game else None) or request.captured_at
+
+    recent_logs = _load_recent_player_logs(
+        session,
+        player_id=request.player_id,
+        cutoff=cutoff,
+        history_limit=history_limit,
+        logs_by_player=logs_by_player,
+    )
+    if not recent_logs:
+        return None
+
+    latest_log = recent_logs[0]
+    team_abbreviation, opponent_abbreviation, is_home = _resolve_team_context(
+        request.team_abbreviation or latest_log.team,
+        request.opponent_abbreviation or latest_log.opponent,
+        game,
+        latest_log,
+        request.is_home,
+    )
+
+    advanced_rows = _load_player_advanced_rows(
+        session,
+        player_id=request.player_id,
+        recent_logs=recent_logs,
+        advanced_by_player_game=advanced_by_player_game,
+    )
+    rotation_rows = _load_player_rotation_rows(
+        session,
+        player_id=request.player_id,
+        recent_logs=recent_logs,
+        rotation_by_player_game=rotation_by_player_game,
+    )
+
+    days_rest = None
+    if latest_log.game_date is not None and cutoff is not None:
+        days_rest = max((cutoff.date() - latest_log.game_date.date()).days, 0)
+
+    season = (game.season if game and game.season else None) or _season_from_game_date(cutoff)
+    team_team_id = team_id_by_abbreviation.get(team_abbreviation or "") if team_id_by_abbreviation else None
+    opponent_team_id = team_id_by_abbreviation.get(opponent_abbreviation or "") if team_id_by_abbreviation else None
+    team_defense = defense_by_season_team.get((season, team_team_id)) if defense_by_season_team and season and team_team_id else None
+    opponent_defense = defense_by_season_team.get((season, opponent_team_id)) if defense_by_season_team and season and opponent_team_id else None
+
+    report_game_date = cutoff.date() if isinstance(cutoff, datetime) else None
+    pregame_context_row = None
+    if pregame_context_index is not None:
+        pregame_context_row = match_pregame_context_row(
+            pregame_context_index,
+            game_id=request.game_id,
+            player_id=request.player_id,
+            team_abbreviation=team_abbreviation,
+            player_name=request.player_name,
+            captured_at=request.captured_at,
+        )
+
+    official_injury_row = None
+    official_injury_team_summary = None
+    official_injury_team_rows: list[dict[str, Any]] | None = None
+    if official_injury_index is not None:
+        official_injury_row = match_official_injury_row(
+            official_injury_index,
+            game_date=report_game_date,
+            player_id=request.player_id,
+            team_abbreviation=team_abbreviation,
+            player_name=request.player_name,
+        )
+        official_injury_team_summary = get_official_team_summary(
+            official_injury_index,
+            game_date=report_game_date,
+            team_abbreviation=team_abbreviation,
+        )
+        official_injury_team_rows = get_official_team_rows(
+            official_injury_index,
+            game_date=report_game_date,
+            team_abbreviation=team_abbreviation,
+        )
+
+    team_role_prior = load_team_role_prior(
+        session,
+        team_id=team_team_id,
+        team_abbreviation=team_abbreviation,
+        cutoff=cutoff,
+        cache=team_role_prior_cache,
+        logs_by_team=logs_by_team,
+        advanced_by_player_game=advanced_by_player_game,
+        rotation_by_team_game_player=rotation_by_team_game_player,
+    )
+
+    return PregameFeatureSeed(
+        game_id=request.game_id,
+        player_id=request.player_id,
+        player_name=request.player_name,
+        stat_type=request.stat_type,
+        line=float(request.line),
+        over_odds=int(request.over_odds),
+        under_odds=int(request.under_odds),
+        captured_at=request.captured_at,
+        game_date=cutoff,
+        team_abbreviation=team_abbreviation,
+        opponent_abbreviation=opponent_abbreviation,
+        is_home=is_home,
+        days_rest=days_rest,
+        back_to_back=days_rest == 1 if days_rest is not None else None,
+        recent_logs=recent_logs,
+        advanced_rows=advanced_rows,
+        rotation_rows=rotation_rows,
+        team_defense=team_defense,
+        opponent_defense=opponent_defense,
+        league_avg_def_rating=league_avg_def_rating_by_season.get(season) if league_avg_def_rating_by_season and season else None,
+        league_avg_pace=league_avg_pace_by_season.get(season) if league_avg_pace_by_season and season else None,
+        league_avg_opponent_points=league_avg_opponent_points_by_season.get(season) if league_avg_opponent_points_by_season and season else None,
+        pregame_context_row=pregame_context_row,
+        official_injury_row=official_injury_row,
+        official_injury_team_summary=official_injury_team_summary,
+        official_injury_team_rows=official_injury_team_rows,
+        team_role_prior=team_role_prior,
+    )
+
+
+def load_pregame_feature_seeds(
+    captured_at: datetime | None = None,
+    stat_type: str = "points",
+    limit: int | None = None,
+) -> list[PregameFeatureSeed]:
     with session_scope() as session:
         latest_captured_at = captured_at
         if latest_captured_at is None:
@@ -491,32 +1123,33 @@ def load_pregame_feature_seeds(captured_at: datetime | None = None, stat_type: s
         if not markets:
             return []
 
+        game_ids = [market.game_id for market in markets]
         games_by_id = {
             game.game_id: game
             for game in session.query(Game)
-            .filter(Game.game_id.in_([market.game_id for market in markets]))
+            .filter(Game.game_id.in_(game_ids))
             .all()
         }
         teams = session.query(Team).all()
         team_id_by_abbreviation = {team.abbreviation: team.team_id for team in teams if team.abbreviation}
 
-        team_defense_rows = session.query(TeamDefensiveStat).all()
-        defense_by_team_id: dict[str, TeamDefensiveStat] = {}
-        for row in team_defense_rows:
-            current = defense_by_team_id.get(row.team_id)
-            if current is None or row.updated_at > current.updated_at:
-                defense_by_team_id[row.team_id] = row
+        defense_by_season_team, league_avg_def_rating_by_season, league_avg_pace_by_season, league_avg_opponent_points_by_season = _build_defense_context(
+            session.query(TeamDefensiveStat).all()
+        )
 
-        league_avg_def_rating = _mean([float(row.defensive_rating) for row in defense_by_team_id.values() if row.defensive_rating is not None])
-        league_avg_pace = _mean([float(row.pace) for row in defense_by_team_id.values() if row.pace is not None])
-        league_avg_opponent_points = _mean([
-            float(row.opponent_points_per_game)
-            for row in defense_by_team_id.values()
-            if row.opponent_points_per_game is not None
-        ])
+        pregame_rows = load_pregame_context_snapshot_rows(session, game_ids=game_ids, captured_at=latest_captured_at)
+        if not pregame_rows:
+            pregame_rows = load_pregame_context_feature_rows()
+        pregame_context_index = build_pregame_context_index(pregame_rows)
 
-        pregame_context_index = build_pregame_context_index(load_pregame_context_feature_rows())
-        official_injury_dates = sorted({(game.game_date if game and game.game_date else latest_captured_at).date() for game in games_by_id.values()} | {latest_captured_at.date()})
+        official_injury_dates = sorted(
+            {
+                (game.game_time_utc if game and game.game_time_utc else game.game_date if game else latest_captured_at).date()
+                for game in games_by_id.values()
+                if (game.game_time_utc if game and game.game_time_utc else game.game_date if game else latest_captured_at) is not None
+            }
+            | {latest_captured_at.date()}
+        )
         official_injury_index = build_official_injury_report_index(
             load_latest_official_injury_report_rows(
                 session,
@@ -524,106 +1157,44 @@ def load_pregame_feature_seeds(captured_at: datetime | None = None, stat_type: s
                 captured_at=latest_captured_at,
             )
         )
+        team_role_prior_cache: dict[tuple[str, str], TeamRolePrior | None] = {}
 
         seeds: list[PregameFeatureSeed] = []
         for market in markets:
-            game = games_by_id.get(market.game_id)
-            cutoff = game.game_date if game and game.game_date else market.captured_at
-            recent_logs = (
-                session.query(HistoricalGameLog)
-                .filter(HistoricalGameLog.player_id == market.player_id, HistoricalGameLog.game_date < cutoff)
-                .order_by(HistoricalGameLog.game_date.desc())
-                .limit(15)
-                .all()
-            )
-            if not recent_logs:
-                continue
-
-            latest_log = recent_logs[0]
-            team_abbreviation, opponent_abbreviation, is_home = _resolve_team_context(market, game, latest_log)
-
-            advanced_rows: list[HistoricalAdvancedLog] = []
-            rotation_rows: list[PlayerRotationGame] = []
-            game_ids = [log.game_id for log in recent_logs]
-            if game_ids:
-                advanced_by_game = {
-                    row.game_id: row
-                    for row in session.query(HistoricalAdvancedLog)
-                    .filter(HistoricalAdvancedLog.player_id == market.player_id, HistoricalAdvancedLog.game_id.in_(game_ids))
-                    .all()
-                }
-                advanced_rows = [advanced_by_game[log.game_id] for log in recent_logs if log.game_id in advanced_by_game]
-
-                rotation_by_game = {
-                    row.game_id: row
-                    for row in session.query(PlayerRotationGame)
-                    .filter(PlayerRotationGame.player_id == market.player_id, PlayerRotationGame.game_id.in_(game_ids))
-                    .all()
-                }
-                rotation_rows = [rotation_by_game[log.game_id] for log in recent_logs if log.game_id in rotation_by_game]
-
-            days_rest = None
-            if latest_log.game_date and cutoff:
-                days_rest = max((cutoff.date() - latest_log.game_date.date()).days, 0)
-
-            opponent_team_id = team_id_by_abbreviation.get(opponent_abbreviation or "")
-            team_team_id = team_id_by_abbreviation.get(team_abbreviation or "")
-            opponent_defense = defense_by_team_id.get(opponent_team_id) if opponent_team_id else None
-            team_defense = defense_by_team_id.get(team_team_id) if team_team_id else None
-            report_game_date = cutoff.date() if isinstance(cutoff, datetime) else None
-            pregame_context_row = match_pregame_context_row(
-                pregame_context_index,
-                game_id=market.game_id,
-                player_id=market.player_id,
-                team_abbreviation=team_abbreviation,
-                player_name=market.player_name,
-            )
-            official_injury_row = match_official_injury_row(
-                official_injury_index,
-                game_date=report_game_date,
-                player_id=market.player_id,
-                team_abbreviation=team_abbreviation,
-                player_name=market.player_name,
-            )
-            official_injury_team_summary = get_official_team_summary(
-                official_injury_index,
-                game_date=report_game_date,
-                team_abbreviation=team_abbreviation,
-            )
-
-            seeds.append(
-                PregameFeatureSeed(
+            seed = build_pregame_feature_seed(
+                session,
+                PregameFeatureRequest(
                     game_id=market.game_id,
                     player_id=market.player_id,
                     player_name=market.player_name,
                     stat_type=market.stat_type,
+                    captured_at=market.captured_at,
                     line=float(market.line),
                     over_odds=int(market.over_odds),
                     under_odds=int(market.under_odds),
-                    captured_at=market.captured_at,
-                    game_date=cutoff,
-                    team_abbreviation=team_abbreviation,
-                    opponent_abbreviation=opponent_abbreviation,
-                    is_home=is_home,
-                    days_rest=days_rest,
-                    back_to_back=days_rest == 1 if days_rest is not None else None,
-                    recent_logs=recent_logs,
-                    advanced_rows=advanced_rows,
-                    rotation_rows=rotation_rows,
-                    team_defense=team_defense,
-                    opponent_defense=opponent_defense,
-                    league_avg_def_rating=league_avg_def_rating,
-                    league_avg_pace=league_avg_pace,
-                    league_avg_opponent_points=league_avg_opponent_points,
-                    pregame_context_row=pregame_context_row,
-                    official_injury_row=official_injury_row,
-                    official_injury_team_summary=official_injury_team_summary,
-                )
+                    team_abbreviation=market.team,
+                    opponent_abbreviation=market.opponent,
+                ),
+                games_by_id=games_by_id,
+                team_id_by_abbreviation=team_id_by_abbreviation,
+                defense_by_season_team=defense_by_season_team,
+                league_avg_def_rating_by_season=league_avg_def_rating_by_season,
+                league_avg_pace_by_season=league_avg_pace_by_season,
+                league_avg_opponent_points_by_season=league_avg_opponent_points_by_season,
+                pregame_context_index=pregame_context_index,
+                official_injury_index=official_injury_index,
+                team_role_prior_cache=team_role_prior_cache,
             )
+            if seed is not None:
+                seeds.append(seed)
 
     return seeds
 
 
-def build_pregame_opportunity_features(captured_at: datetime | None = None, stat_type: str = "points", limit: int | None = None) -> list[PregameOpportunityFeatures]:
+def build_pregame_opportunity_features(
+    captured_at: datetime | None = None,
+    stat_type: str = "points",
+    limit: int | None = None,
+) -> list[PregameOpportunityFeatures]:
     seeds = load_pregame_feature_seeds(captured_at=captured_at, stat_type=stat_type, limit=limit)
     return [seed.build_opportunity_features() for seed in seeds]

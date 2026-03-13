@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import re
-import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy.orm import Session
 
+from analytics.name_matching import candidate_name_keys
 from database.models import OfficialInjuryReport, OfficialInjuryReportEntry
 
 
@@ -16,6 +15,7 @@ class OfficialInjuryReportIndex:
     by_date_team_player_id: dict[tuple[str, str, str], dict[str, Any]]
     by_date_team_name: dict[tuple[str, str, str], dict[str, Any]]
     team_summaries: dict[tuple[str, str], dict[str, Any]]
+    team_rows: dict[tuple[str, str], list[dict[str, Any]]]
 
 
 def load_latest_official_injury_report_rows(
@@ -49,30 +49,14 @@ def load_latest_official_injury_report_rows(
         .filter(OfficialInjuryReportEntry.report_id.in_(list(latest_report_ids.values())))
         .all()
     )
-    rows: list[dict[str, Any]] = []
-    for entry in entries:
-        rows.append(
-            {
-                "report_id": entry.report_id,
-                "report_datetime_utc": entry.report_datetime_utc,
-                "game_date": entry.game_date,
-                "matchup": entry.matchup,
-                "team_abbreviation": entry.team_abbreviation,
-                "team_name": entry.team_name,
-                "player_id": entry.player_id,
-                "player_name": entry.player_name,
-                "current_status": entry.current_status,
-                "reason": entry.reason,
-                "report_submitted": entry.report_submitted,
-            }
-        )
-    return rows
+    return [_entry_to_row(entry) for entry in entries]
 
 
 def build_official_injury_report_index(rows: list[dict[str, Any]]) -> OfficialInjuryReportIndex:
     by_date_team_player_id: dict[tuple[str, str, str], dict[str, Any]] = {}
     by_date_team_name: dict[tuple[str, str, str], dict[str, Any]] = {}
     team_summaries: dict[tuple[str, str], dict[str, Any]] = {}
+    team_rows: dict[tuple[str, str], list[dict[str, Any]]] = {}
 
     for row in rows:
         game_date = row.get("game_date")
@@ -87,9 +71,10 @@ def build_official_injury_report_index(rows: list[dict[str, Any]]) -> OfficialIn
         if player_id not in (None, ""):
             by_date_team_player_id[(date_key, team_abbreviation, str(player_id))] = row
         if player_name:
-            for candidate in _candidate_name_keys(player_name):
+            for candidate in candidate_name_keys(player_name):
                 by_date_team_name.setdefault((date_key, team_abbreviation, candidate), row)
 
+        team_rows.setdefault((date_key, team_abbreviation), []).append(row)
         team_summary = team_summaries.setdefault(
             (date_key, team_abbreviation),
             {
@@ -126,10 +111,14 @@ def build_official_injury_report_index(rows: list[dict[str, Any]]) -> OfficialIn
         elif current_status == "AVAILABLE":
             team_summary["available_count"] += 1
 
+    for rows_for_team in team_rows.values():
+        rows_for_team.sort(key=lambda row: (str(row.get("player_name") or ""), str(row.get("player_id") or "")))
+
     return OfficialInjuryReportIndex(
         by_date_team_player_id=by_date_team_player_id,
         by_date_team_name=by_date_team_name,
         team_summaries=team_summaries,
+        team_rows=team_rows,
     )
 
 
@@ -153,7 +142,7 @@ def match_official_injury_row(
         if match is not None:
             return match
 
-    for candidate in _candidate_name_keys(player_name):
+    for candidate in candidate_name_keys(player_name):
         match = index.by_date_team_name.get((date_key, team_abbr, candidate))
         if match is not None:
             return match
@@ -171,24 +160,29 @@ def get_official_team_summary(
     return index.team_summaries.get((game_date.isoformat(), team_abbreviation.upper()))
 
 
-def _normalize_name(name: str) -> str:
-    ascii_name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
-    cleaned = re.sub(r"[^a-zA-Z0-9 ]+", " ", ascii_name.lower())
-    return re.sub(r"\s+", " ", cleaned).strip()
-
-
-def _candidate_name_keys(name: str) -> list[str]:
-    normalized = _normalize_name(name)
-    if not normalized:
+def get_official_team_rows(
+    index: OfficialInjuryReportIndex,
+    *,
+    game_date: date | None,
+    team_abbreviation: str | None,
+) -> list[dict[str, Any]]:
+    if game_date is None or not team_abbreviation:
         return []
+    return list(index.team_rows.get((game_date.isoformat(), team_abbreviation.upper()), []))
 
-    keys = [normalized]
-    tokens = normalized.split()
-    suffixes = {"jr", "sr", "ii", "iii", "iv", "v"}
-    while tokens and tokens[-1] in suffixes:
-        tokens = tokens[:-1]
-        if tokens:
-            candidate = " ".join(tokens)
-            if candidate not in keys:
-                keys.append(candidate)
-    return keys
+
+def _entry_to_row(entry: OfficialInjuryReportEntry) -> dict[str, Any]:
+    return {
+        "report_id": entry.report_id,
+        "report_datetime_utc": entry.report_datetime_utc,
+        "game_date": entry.game_date,
+        "matchup": entry.matchup,
+        "team_abbreviation": entry.team_abbreviation,
+        "team_name": entry.team_name,
+        "player_id": entry.player_id,
+        "player_name": entry.player_name,
+        "current_status": entry.current_status,
+        "reason": entry.reason,
+        "report_submitted": entry.report_submitted,
+    }
+

@@ -7,9 +7,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from analytics.pregame_context_loader import build_pregame_context_index, match_pregame_context_row
+from analytics.name_matching import normalize_name
+from analytics.pregame_context_loader import (
+    build_pregame_context_index,
+    load_pregame_context_snapshot_rows,
+    match_pregame_context_row,
+)
 from database.db import session_scope
 from database.models import Game, HistoricalGameLog, PlayerPropSnapshot
+from ingestion.writer import write_pregame_context_snapshots
 
 FEATURE_PACK_ROOT = Path(__file__).resolve().parent.parent / "pregame_context_feature_pack"
 FEATURE_PACK_SRC = FEATURE_PACK_ROOT / "src"
@@ -27,6 +33,7 @@ class PregameContextSyncResult:
     feature_rows_path: Path
     history_feature_rows_path: Path
     attachment_metrics: dict[str, Any]
+    captured_at: datetime | None
 
 
 def sync_pregame_context(
@@ -40,6 +47,7 @@ def sync_pregame_context(
     from nbarotations_scraper import (
         PregameContextIngestor,
         TeamGameRef,
+        TeamPriors,
         build_pregame_feature_rows,
         load_team_priors,
         save_feature_rows,
@@ -54,10 +62,17 @@ def sync_pregame_context(
     payload = PregameContextIngestor().fetch(schedule_refs=schedule_refs or None)
     latest_payload_path, history_payload_path = save_pregame_payload(payload, base_dir=resolved_base_dir)
 
-    priors = load_team_priors(resolved_team_priors)
+    priors: dict[int, TeamPriors]
+    if resolved_team_priors is not None:
+        priors = load_team_priors(resolved_team_priors)
+    else:
+        priors = _build_runtime_team_priors(TeamPriors, captured_at=resolved_captured_at)
+
     feature_rows = build_pregame_feature_rows(payload, priors_by_team_id=priors)
+    feature_rows = _decorate_feature_rows(feature_rows, payload=payload, captured_at=resolved_captured_at)
     feature_rows_path = save_feature_rows(feature_rows, resolved_base_dir / "features" / "latest.json")
     history_feature_rows_path = _save_feature_rows_history(feature_rows, resolved_base_dir / "features" / "history", resolved_captured_at)
+    write_pregame_context_snapshots(feature_rows, captured_at=resolved_captured_at)
 
     attachment_metrics = summarize_pregame_context_attachment(
         feature_rows=feature_rows,
@@ -72,6 +87,7 @@ def sync_pregame_context(
         feature_rows_path=feature_rows_path,
         history_feature_rows_path=history_feature_rows_path,
         attachment_metrics=attachment_metrics,
+        captured_at=resolved_captured_at,
     )
 
 
@@ -81,10 +97,6 @@ def summarize_pregame_context_attachment(
     captured_at: datetime | None = None,
     stat_type: str = "points",
 ) -> dict[str, Any]:
-    rows = feature_rows if feature_rows is not None else _load_feature_rows(DEFAULT_FEATURES_PATH)
-    index = build_pregame_context_index(rows)
-    context_game_ids = sorted({str(row.get("game_id") or "") for row in rows if row.get("game_id")})
-
     with session_scope() as session:
         latest_captured_at = captured_at
         if latest_captured_at is None:
@@ -102,7 +114,7 @@ def summarize_pregame_context_attachment(
                 "attached_count": 0,
                 "attached_pct": 0.0,
                 "market_game_ids": [],
-                "context_game_ids": context_game_ids,
+                "context_game_ids": [],
                 "overlap_game_ids": [],
                 "missing_context_game_ids": [],
                 "expected_start_count": 0,
@@ -120,14 +132,23 @@ def summarize_pregame_context_attachment(
             )
             .all()
         )
+        market_game_ids = sorted({market.game_id for market, _ in markets if market.game_id})
+
+        rows = feature_rows
+        if rows is None:
+            rows = load_pregame_context_snapshot_rows(session, game_ids=market_game_ids, captured_at=latest_captured_at)
+            if not rows:
+                rows = _load_feature_rows(DEFAULT_FEATURES_PATH)
+
+        index = build_pregame_context_index(rows)
+        context_game_ids = sorted({str(row.get("game_id") or "") for row in rows if row.get("game_id")})
+        overlap_game_ids = sorted(set(market_game_ids) & set(context_game_ids))
 
         attached_count = 0
         expected_start_count = 0
         projected_unavailable_count = 0
         high_late_scratch_risk_count = 0
         coverage_examples: list[dict[str, Any]] = []
-        market_game_ids = sorted({market.game_id for market, _ in markets if market.game_id})
-        overlap_game_ids = sorted(set(market_game_ids) & set(context_game_ids))
 
         for market, game in markets:
             team_abbr = _resolve_market_team_abbreviation(session, market, game)
@@ -137,6 +158,7 @@ def summarize_pregame_context_attachment(
                 player_id=market.player_id,
                 team_abbreviation=team_abbr,
                 player_name=market.player_name,
+                captured_at=latest_captured_at,
             )
             if row is None:
                 continue
@@ -179,7 +201,7 @@ def summarize_pregame_context_attachment(
 
 
 def build_pregame_context_source_payloads(result: PregameContextSyncResult) -> list[dict[str, Any]]:
-    captured_at = _captured_at_from_payload(result.payload)
+    captured_at = result.captured_at or _captured_at_from_payload(result.payload)
     return [
         {
             "source": "pregame_context",
@@ -205,6 +227,50 @@ def build_pregame_context_source_payloads(result: PregameContextSyncResult) -> l
             "captured_at": captured_at,
         },
     ]
+
+
+def _decorate_feature_rows(
+    rows: list[dict[str, Any]],
+    *,
+    payload: dict[str, Any],
+    captured_at: datetime | None,
+) -> list[dict[str, Any]]:
+    source_captured_at = _captured_at_from_payload(payload)
+    effective_captured_at = captured_at or source_captured_at
+    decorated: list[dict[str, Any]] = []
+    for row in rows:
+        player_name = row.get("player_name") or ""
+        decorated.append(
+            {
+                **row,
+                "team_abbreviation": row.get("team_abbr"),
+                "normalized_player_name": normalize_name(player_name) if player_name else None,
+                "source_captured_at": source_captured_at,
+                "captured_at": effective_captured_at,
+            }
+        )
+    return decorated
+
+
+def _build_runtime_team_priors(team_priors_cls: Any, *, captured_at: datetime | None) -> dict[int, Any]:
+    from analytics.features_opportunity import build_team_role_priors
+
+    role_priors = build_team_role_priors(cutoff=captured_at)
+    converted: dict[int, Any] = {}
+    for team_id, prior in role_priors.items():
+        try:
+            converted[int(team_id)] = team_priors_cls(
+                top7_player_ids={int(player_id) for player_id in prior.top7_player_ids},
+                top9_player_ids={int(player_id) for player_id in prior.top9_player_ids},
+                high_usage_player_ids={int(player_id) for player_id in prior.high_usage_player_ids},
+                primary_ballhandler_ids={int(player_id) for player_id in prior.primary_ballhandler_ids},
+                frontcourt_rotation_player_ids=set(),
+                baseline_minutes_by_player_id={int(player_id): float(value) for player_id, value in prior.baseline_minutes_by_player_id.items()},
+                baseline_usage_by_player_id={int(player_id): float(value) for player_id, value in prior.baseline_usage_by_player_id.items()},
+            )
+        except ValueError:
+            continue
+    return converted
 
 
 def _save_feature_rows_history(rows: list[dict[str, Any]], history_dir: Path, captured_at: datetime | None) -> Path:
@@ -309,7 +375,7 @@ def _resolve_market_team_abbreviation(session: Any, market: PlayerPropSnapshot, 
     latest_log = None
 
     if not candidate_team or not candidate_opponent:
-        cutoff = game.game_date if game and game.game_date else market.captured_at
+        cutoff = game.game_time_utc if game and game.game_time_utc else game.game_date if game and game.game_date else market.captured_at
         latest_log = (
             session.query(HistoricalGameLog)
             .filter(HistoricalGameLog.player_id == market.player_id, HistoricalGameLog.game_date < cutoff)

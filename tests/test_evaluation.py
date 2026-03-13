@@ -4,7 +4,13 @@ import unittest
 from datetime import date, datetime
 from types import SimpleNamespace
 
-from analytics.evaluation import _build_historical_injury_report_indexes, _select_historical_injury_index
+from analytics.evaluation import (
+    _build_historical_injury_report_indexes,
+    _build_odds_index,
+    _select_historical_injury_index,
+    _select_latest_pregame_odds_snapshot,
+    _summarize_points_errors,
+)
 from analytics.injury_report_loader import get_official_team_summary, match_official_injury_row
 
 
@@ -106,6 +112,50 @@ class HistoricalInjuryEvaluationTests(unittest.TestCase):
         self.assertEqual(early_match['current_status'], 'QUESTIONABLE')
         self.assertEqual(late_match['current_status'], 'AVAILABLE')
         self.assertEqual(late_summary['out_count'], 1)
+
+
+class HistoricalOddsEvaluationTests(unittest.TestCase):
+    def test_select_latest_odds_snapshot_respects_tip_cutoff_and_lead_windows(self):
+        rows = [
+            SimpleNamespace(game_id="G1", player_id="7", captured_at=datetime(2026, 1, 5, 17, 45, 0), line=23.5, over_odds=-110, under_odds=-110),
+            SimpleNamespace(game_id="G1", player_id="7", captured_at=datetime(2026, 1, 5, 18, 40, 0), line=24.5, over_odds=-110, under_odds=-110),
+            SimpleNamespace(game_id="G1", player_id="7", captured_at=datetime(2026, 1, 5, 19, 5, 0), line=25.5, over_odds=-110, under_odds=-110),
+        ]
+        index = _build_odds_index(rows)
+
+        latest = _select_latest_pregame_odds_snapshot(
+            index,
+            game_id="G1",
+            player_id="7",
+            cutoff=datetime(2026, 1, 5, 19, 0, 0),
+        )
+        with_min_lead = _select_latest_pregame_odds_snapshot(
+            index,
+            game_id="G1",
+            player_id="7",
+            cutoff=datetime(2026, 1, 5, 19, 0, 0),
+            min_minutes_before_tip=30,
+        )
+
+        self.assertEqual(latest.line, 24.5)
+        self.assertEqual(with_min_lead.line, 23.5)
+
+
+    def test_summarize_points_errors_returns_zeroed_empty_slice(self):
+        empty = _summarize_points_errors([])
+        populated = _summarize_points_errors([
+            SimpleNamespace(error=2.0, abs_error=2.0),
+            SimpleNamespace(error=-1.0, abs_error=1.0),
+        ])
+
+        self.assertEqual(empty.sample_size, 0)
+        self.assertEqual(empty.mae, 0.0)
+        self.assertEqual(populated.sample_size, 2)
+        self.assertEqual(populated.mae, 1.5)
+        self.assertEqual(populated.rmse, 1.5811)
+        self.assertEqual(populated.bias, 0.5)
+        self.assertEqual(populated.within_two_points_pct, 1.0)
+        self.assertEqual(populated.within_four_points_pct, 1.0)
 
 
 if __name__ == '__main__':

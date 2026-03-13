@@ -4,7 +4,16 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any
 
-from analytics.features_opportunity import PregameOpportunityFeatures, _mean, _median, _safe_pct, _std, _values, load_pregame_feature_seeds
+from analytics.features_opportunity import (
+    PregameFeatureSeed,
+    PregameOpportunityFeatures,
+    _mean,
+    _median,
+    _safe_pct,
+    _std,
+    _values,
+    load_pregame_feature_seeds,
+)
 from database.models import HistoricalAdvancedLog, HistoricalGameLog
 
 
@@ -90,19 +99,22 @@ def _build_points_advanced_aggregates(rows: list[HistoricalAdvancedLog]) -> dict
     }
 
 
+def build_pregame_points_features_from_seed(seed: PregameFeatureSeed) -> PregamePointsFeatures:
+    opportunity = seed.build_opportunity_features()
+    return PregamePointsFeatures(
+        **opportunity.to_dict(),
+        line=seed.line,
+        over_odds=seed.over_odds,
+        under_odds=seed.under_odds,
+        **_build_points_log_aggregates(seed.recent_logs),
+        **_build_points_advanced_aggregates(seed.advanced_rows),
+    )
+
+
+def build_pregame_points_features_from_seeds(seeds: list[PregameFeatureSeed]) -> list[PregamePointsFeatures]:
+    return [build_pregame_points_features_from_seed(seed) for seed in seeds]
+
+
 def build_pregame_points_features(captured_at: datetime | None = None, limit: int | None = None) -> list[PregamePointsFeatures]:
     seeds = load_pregame_feature_seeds(captured_at=captured_at, stat_type="points", limit=limit)
-    feature_rows: list[PregamePointsFeatures] = []
-    for seed in seeds:
-        opportunity = seed.build_opportunity_features()
-        feature_rows.append(
-            PregamePointsFeatures(
-                **opportunity.to_dict(),
-                line=seed.line,
-                over_odds=seed.over_odds,
-                under_odds=seed.under_odds,
-                **_build_points_log_aggregates(seed.recent_logs),
-                **_build_points_advanced_aggregates(seed.advanced_rows),
-            )
-        )
-    return feature_rows
+    return build_pregame_points_features_from_seeds(seeds)

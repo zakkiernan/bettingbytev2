@@ -59,7 +59,7 @@ from ingestion.writer import (
 STATUS_SCHEDULED = 1
 STATUS_LIVE = 2
 STATUS_FINISHED = 3
-
+PREGAME_PROP_SNAPSHOT_PHASES = ("early", "late", "tip")
 
 def _normalize_metrics(result: dict[str, Any] | int | None) -> dict[str, Any]:
     if result is None:
@@ -168,6 +168,38 @@ def reconcile_canonical_games_from_history(season: str | None = DEFAULT_SEASON) 
 def bootstrap_backend() -> None:
     init_db()
 
+
+def _sync_prop_snapshot_phase_impl(snapshot_phase: str, run_id: int | None = None) -> dict[str, Any]:
+    _sync_reference_entities_impl(run_id=run_id)
+
+    board = fetch_current_prop_board()
+    props = board["props"]
+    event_mappings = board["event_mappings"]
+    payloads = board.get("payloads", [])
+    unmapped_events = sum(1 for mapping in event_mappings if not mapping.get("nba_game_id"))
+
+    schedule_games_today, schedule_payloads_today = get_todays_games_bundle()
+
+    write_source_payloads(payloads + schedule_payloads_today)
+    write_games(schedule_games_today)
+    write_players(_players_from_rows(props))
+    write_sportsbook_event_mappings(event_mappings)
+    write_prop_snapshot(props, is_live=False, snapshot_phase=snapshot_phase)
+
+    return {
+        "snapshot_phase": snapshot_phase,
+        "props": len(props),
+        "event_mappings": len(event_mappings),
+        "unmapped_events": unmapped_events,
+        "raw_payloads": len(payloads) + len(schedule_payloads_today),
+        "schedule_games": len(schedule_games_today),
+    }
+
+
+def sync_prop_snapshot_phase(snapshot_phase: str) -> dict[str, Any]:
+    if snapshot_phase not in PREGAME_PROP_SNAPSHOT_PHASES and snapshot_phase != "current":
+        raise ValueError(f"Unsupported prop snapshot phase: {snapshot_phase}")
+    return _run_logged_job(f"sync_prop_snapshot_{snapshot_phase}", _sync_prop_snapshot_phase_impl, snapshot_phase)
 
 def _sync_pregame_markets_impl(run_id: int | None = None) -> dict[str, int]:
     _sync_reference_entities_impl(run_id=run_id)
@@ -766,3 +798,5 @@ def backfill_official_injury_reports(
         report_times,
         delay_seconds,
     )
+
+

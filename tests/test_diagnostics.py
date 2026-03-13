@@ -28,6 +28,48 @@ class PregameDiagnosticsTests(unittest.TestCase):
         self.assertEqual(analysis.buckets[0].label, "minutes_shortfall")
         self.assertEqual(analysis.examples[0]["category"], "minutes_shortfall")
 
+    def test_points_miss_analysis_tracks_line_availability_splits(self):
+        with_line = SimpleNamespace(
+            player_name="With Line",
+            game_id="010",
+            game_date=datetime(2026, 1, 4, 19, 0, 0),
+            projected_points=22.0,
+            actual_points=10.0,
+            actual_minutes=7.0,
+            expected_minutes=30.0,
+            error=12.0,
+            abs_error=12.0,
+            opponent_adjustment=0.1,
+            recent_form_adjustment=0.2,
+            pregame_context_attached=True,
+            line_available=True,
+        )
+        without_line = SimpleNamespace(
+            player_name="Without Line",
+            game_id="011",
+            game_date=datetime(2026, 1, 5, 19, 0, 0),
+            projected_points=19.0,
+            actual_points=17.0,
+            actual_minutes=29.0,
+            expected_minutes=28.0,
+            error=2.0,
+            abs_error=2.0,
+            opponent_adjustment=0.1,
+            recent_form_adjustment=0.2,
+            pregame_context_attached=False,
+            line_available=False,
+        )
+
+        analysis = analyze_pregame_points_misses(SimpleNamespace(rows=[with_line, without_line]), top_n=10)
+
+        self.assertEqual(analysis.line_available_count, 1)
+        self.assertEqual(analysis.line_missing_count, 1)
+        self.assertEqual(analysis.with_line_buckets[0].label, "minutes_shortfall")
+        self.assertEqual(analysis.without_line_buckets[0].label, "mixed")
+        self.assertTrue(analysis.examples[0]["line_available"] )
+
+
+
     def test_opportunity_miss_analysis_labels_role_and_usage_misses(self):
         start_miss = SimpleNamespace(
             player_name="Starter Miss",

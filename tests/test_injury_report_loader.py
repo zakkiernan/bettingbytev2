@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from datetime import date, datetime
 
-from analytics.features_opportunity import _build_official_injury_aggregates, _merge_context_aggregates
+from analytics.features_opportunity import TeamRolePrior, _build_official_injury_aggregates, _merge_context_aggregates
 from analytics.injury_report_loader import build_official_injury_report_index, get_official_team_summary, match_official_injury_row
 
 
@@ -75,6 +75,32 @@ class OfficialInjuryReportLoaderTests(unittest.TestCase):
         self.assertIsNotNone(match)
         self.assertEqual(match["player_id"], "1630530")
 
+    def test_match_falls_back_to_initials_variant(self):
+        rows = [
+            {
+                "game_date": date(2026, 3, 12),
+                "team_abbreviation": "MIL",
+                "player_id": "203932",
+                "player_name": "A.J. Green",
+                "current_status": "Available",
+                "reason": None,
+                "report_datetime_utc": datetime(2026, 3, 12, 17, 0, 0),
+                "report_submitted": True,
+            }
+        ]
+
+        index = build_official_injury_report_index(rows)
+        match = match_official_injury_row(
+            index,
+            game_date=date(2026, 3, 12),
+            player_id=None,
+            team_abbreviation="MIL",
+            player_name="AJ Green",
+        )
+
+        self.assertIsNotNone(match)
+        self.assertEqual(match["player_id"], "203932")
+
 
 class OfficialInjuryOpportunityFeatureTests(unittest.TestCase):
     def test_official_injury_aggregates_map_status_and_team_counts(self):
@@ -119,13 +145,14 @@ class OfficialInjuryOpportunityFeatureTests(unittest.TestCase):
         self.assertLessEqual(aggregates["pregame_context_confidence"], 0.25)
 
 
-    def test_merge_context_prefers_existing_pregame_values_but_keeps_injury_fallback(self):
+    def test_merge_context_lets_official_out_override_conflicting_pregame_availability(self):
         merged = _merge_context_aggregates(
             {
                 "expected_start": True,
                 "starter_confidence": 0.9,
                 "official_available": True,
                 "projected_available": True,
+                "official_starter_flag": True,
                 "late_scratch_risk": 0.1,
                 "teammate_out_count_top7": 1.0,
                 "teammate_out_count_top9": 1.0,
@@ -144,12 +171,49 @@ class OfficialInjuryOpportunityFeatureTests(unittest.TestCase):
             },
         )
 
-        self.assertTrue(merged["expected_start"])
-        self.assertTrue(merged["official_available"])
+        self.assertFalse(merged["expected_start"])
+        self.assertEqual(merged["starter_confidence"], 0.0)
+        self.assertFalse(merged["official_available"])
+        self.assertFalse(merged["projected_available"])
+        self.assertFalse(merged["official_starter_flag"])
         self.assertEqual(merged["official_injury_status"], "OUT")
         self.assertAlmostEqual(merged["late_scratch_risk"], 1.0)
         self.assertAlmostEqual(merged["teammate_out_count_top7"], 1.0)
         self.assertAlmostEqual(merged["pregame_context_confidence"], 0.8)
+
+
+    def test_role_based_injury_context_uses_team_priors(self):
+        aggregates = _build_official_injury_aggregates(
+            None,
+            {
+                "out_count": 1,
+                "doubtful_count": 0,
+                "questionable_count": 1,
+                "report_datetime_utc": datetime(2026, 3, 12, 17, 0, 0),
+            },
+            team_rows=[
+                {"player_id": "2", "current_status": "OUT", "report_datetime_utc": datetime(2026, 3, 12, 17, 0, 0)},
+                {"player_id": "3", "current_status": "QUESTIONABLE", "report_datetime_utc": datetime(2026, 3, 12, 17, 0, 0)},
+            ],
+            team_role_prior=TeamRolePrior(
+                team_id="1610612738",
+                team_abbreviation="BOS",
+                top7_player_ids={"2", "3"},
+                top9_player_ids={"2", "3"},
+                high_usage_player_ids={"2"},
+                primary_ballhandler_ids={"3"},
+                baseline_minutes_by_player_id={"2": 35.0, "3": 31.0},
+                baseline_usage_by_player_id={"2": 0.29, "3": 0.22},
+            ),
+            player_id="1",
+            captured_at=datetime(2026, 3, 12, 18, 0, 0),
+        )
+
+        self.assertGreater(aggregates["teammate_out_count_top7"], 1.0)
+        self.assertGreater(aggregates["missing_high_usage_teammates"], 0.0)
+        self.assertTrue(aggregates["missing_primary_ballhandler"])
+        self.assertGreater(aggregates["vacated_minutes_proxy"], 40.0)
+        self.assertGreater(aggregates["vacated_usage_proxy"], 0.3)
 
 
 if __name__ == "__main__":

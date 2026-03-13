@@ -139,9 +139,10 @@ class PlayerPropSnapshot(Base):
             "player_id",
             "stat_type",
             "is_live",
-            name="uq_player_prop_snapshot_market",
+            "snapshot_phase",
+            name="uq_player_prop_snapshot_market_phase",
         ),
-        Index("ix_player_prop_snapshot_lookup", "game_id", "player_id", "stat_type", "is_live"),
+        Index("ix_player_prop_snapshot_lookup", "game_id", "player_id", "stat_type", "is_live", "snapshot_phase"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -155,6 +156,7 @@ class PlayerPropSnapshot(Base):
     over_odds: Mapped[int] = mapped_column(Integer, nullable=False)
     under_odds: Mapped[int] = mapped_column(Integer, nullable=False)
     is_live: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    snapshot_phase: Mapped[str] = mapped_column(String, default="current", nullable=False)
     captured_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
 
@@ -475,6 +477,45 @@ class OfficialInjuryReportEntry(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+
+class PregameContextSnapshot(Base):
+    __tablename__ = "pregame_context_snapshots"
+    __table_args__ = (
+        UniqueConstraint("game_id", "player_key", "captured_at", name="uq_pregame_context_snapshot_capture"),
+        Index("ix_pregame_context_snapshot_game_capture", "game_id", "captured_at"),
+        Index("ix_pregame_context_snapshot_player_lookup", "game_id", "team_abbreviation", "player_id", "captured_at"),
+        Index("ix_pregame_context_snapshot_name_lookup", "game_id", "team_abbreviation", "normalized_player_name", "captured_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    game_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    team_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    team_abbreviation: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    opponent_team_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    player_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    player_key: Mapped[str] = mapped_column(String, nullable=False)
+    normalized_player_name: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    player_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    expected_start: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    starter_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    official_available: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    projected_available: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    late_scratch_risk: Mapped[float | None] = mapped_column(Float, nullable=True)
+    teammate_out_count_top7: Mapped[float | None] = mapped_column(Float, nullable=True)
+    teammate_out_count_top9: Mapped[float | None] = mapped_column(Float, nullable=True)
+    missing_high_usage_teammates: Mapped[float | None] = mapped_column(Float, nullable=True)
+    missing_primary_ballhandler: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    missing_frontcourt_rotation_piece: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    vacated_minutes_proxy: Mapped[float | None] = mapped_column(Float, nullable=True)
+    vacated_usage_proxy: Mapped[float | None] = mapped_column(Float, nullable=True)
+    projected_lineup_confirmed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    official_starter_flag: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    pregame_context_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source_captured_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class IngestionRun(Base):
     __tablename__ = "ingestion_runs"
     __table_args__ = (
@@ -566,3 +607,5 @@ class ModelSignal(Base):
     recommended_side: Mapped[str | None] = mapped_column(String, nullable=True)
     metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+

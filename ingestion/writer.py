@@ -22,6 +22,7 @@ from database.models import (
     PlayerRotationGame,
     PlayerRotationStint,
     PlayerPropSnapshot,
+    PregameContextSnapshot,
     SourcePayload,
     SportsbookEventMap,
     Team,
@@ -139,6 +140,62 @@ def write_official_injury_report(report: dict[str, Any], entries: list[dict[str,
 
     logger.info("Upserted official injury report %s with %s entries", report.get("pdf_url"), len(entries))
     return report_id
+
+
+def write_pregame_context_snapshots(rows: list[dict[str, Any]], *, captured_at: datetime | None = None) -> None:
+    if not rows:
+        return
+
+    with session_scope() as session:
+        for row in rows:
+            row_captured_at = captured_at or row.get("captured_at") or datetime.utcnow()
+            existing = (
+                session.query(PregameContextSnapshot)
+                .filter(
+                    PregameContextSnapshot.game_id == str(row["game_id"]),
+                    PregameContextSnapshot.player_key == str(row["player_key"]),
+                    PregameContextSnapshot.captured_at == row_captured_at,
+                )
+                .one_or_none()
+            )
+
+            payload = {
+                "game_id": str(row["game_id"]),
+                "team_id": str(row["team_id"]) if row.get("team_id") not in (None, "") else None,
+                "team_abbreviation": row.get("team_abbr") or row.get("team_abbreviation"),
+                "opponent_team_id": str(row["opponent_team_id"]) if row.get("opponent_team_id") not in (None, "") else None,
+                "player_id": str(row["player_id"]) if row.get("player_id") not in (None, "") else None,
+                "player_key": str(row["player_key"]),
+                "normalized_player_name": row.get("normalized_player_name"),
+                "player_name": row.get("player_name"),
+                "expected_start": row.get("expected_start"),
+                "starter_confidence": float(row["starter_confidence"]) if row.get("starter_confidence") is not None else None,
+                "official_available": row.get("official_available"),
+                "projected_available": row.get("projected_available"),
+                "late_scratch_risk": float(row["late_scratch_risk"]) if row.get("late_scratch_risk") is not None else None,
+                "teammate_out_count_top7": float(row["teammate_out_count_top7"]) if row.get("teammate_out_count_top7") is not None else None,
+                "teammate_out_count_top9": float(row["teammate_out_count_top9"]) if row.get("teammate_out_count_top9") is not None else None,
+                "missing_high_usage_teammates": float(row["missing_high_usage_teammates"]) if row.get("missing_high_usage_teammates") is not None else None,
+                "missing_primary_ballhandler": row.get("missing_primary_ballhandler"),
+                "missing_frontcourt_rotation_piece": row.get("missing_frontcourt_rotation_piece"),
+                "vacated_minutes_proxy": float(row["vacated_minutes_proxy"]) if row.get("vacated_minutes_proxy") is not None else None,
+                "vacated_usage_proxy": float(row["vacated_usage_proxy"]) if row.get("vacated_usage_proxy") is not None else None,
+                "projected_lineup_confirmed": row.get("projected_lineup_confirmed"),
+                "official_starter_flag": row.get("official_starter_flag"),
+                "pregame_context_confidence": float(row["pregame_context_confidence"]) if row.get("pregame_context_confidence") is not None else None,
+                "source_captured_at": row.get("source_captured_at"),
+                "captured_at": row_captured_at,
+            }
+
+            if existing is not None:
+                for field, value in payload.items():
+                    setattr(existing, field, value)
+                continue
+
+            session.add(PregameContextSnapshot(**payload))
+
+    logger.info("Upserted %s pregame context snapshots", len(rows))
+
 
 
 def write_teams(teams: list[dict[str, Any]]) -> None:
@@ -260,7 +317,7 @@ def write_sportsbook_event_mappings(event_mappings: list[dict[str, Any]]) -> Non
     logger.info("Upserted %s sportsbook event mappings", len(event_mappings))
 
 
-def write_prop_snapshot(props: list[dict[str, Any]], is_live: bool = False) -> None:
+def write_prop_snapshot(props: list[dict[str, Any]], is_live: bool = False, snapshot_phase: str = "current") -> None:
     if not props:
         return
 
@@ -273,6 +330,7 @@ def write_prop_snapshot(props: list[dict[str, Any]], is_live: bool = False) -> N
                     PlayerPropSnapshot.player_id == prop["player_id"],
                     PlayerPropSnapshot.stat_type == prop["stat_type"],
                     PlayerPropSnapshot.is_live == is_live,
+                    PlayerPropSnapshot.snapshot_phase == snapshot_phase,
                 )
                 .first()
             )
@@ -284,6 +342,7 @@ def write_prop_snapshot(props: list[dict[str, Any]], is_live: bool = False) -> N
                 existing.line = prop["line"]
                 existing.over_odds = prop["over_odds"]
                 existing.under_odds = prop["under_odds"]
+                existing.snapshot_phase = snapshot_phase
                 existing.captured_at = prop["captured_at"]
                 continue
 
@@ -299,11 +358,12 @@ def write_prop_snapshot(props: list[dict[str, Any]], is_live: bool = False) -> N
                     over_odds=prop["over_odds"],
                     under_odds=prop["under_odds"],
                     is_live=is_live,
+                    snapshot_phase=snapshot_phase,
                     captured_at=prop["captured_at"],
                 )
             )
 
-    logger.info("Upserted %s player prop snapshots", len(props))
+    logger.info("Upserted %s player prop snapshots for %s phase", len(props), snapshot_phase)
 
 
 def write_odds_snapshot(props: list[dict[str, Any]], market_phase: str) -> None:
@@ -663,3 +723,5 @@ def write_model_signals(signals: list[dict[str, Any]]) -> None:
             )
 
     logger.info("Inserted %s model signals", len(signals))
+
+
