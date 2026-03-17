@@ -19,6 +19,7 @@ from api.services.stats_signal_service import (
     get_player_signal_history,
     get_historical_pregame_lines,
     persist_current_signal_snapshots,
+    repair_current_signal_snapshots,
 )
 from database.db import Base
 from database.models import Game, OddsSnapshot, PlayerPropSnapshot, StatsSignalSnapshot
@@ -304,13 +305,13 @@ class SignalRunHealthTests(unittest.TestCase):
         self.SessionLocal = sessionmaker(bind=self.engine, autocommit=False, autoflush=False, expire_on_commit=False, class_=Session)
         Base.metadata.create_all(
             self.engine,
-            tables=[PlayerPropSnapshot.__table__],
+            tables=[PlayerPropSnapshot.__table__, StatsSignalSnapshot.__table__],
         )
 
     def tearDown(self):
         Base.metadata.drop_all(
             self.engine,
-            tables=[PlayerPropSnapshot.__table__],
+            tables=[StatsSignalSnapshot.__table__, PlayerPropSnapshot.__table__],
         )
         self.engine.dispose()
 
@@ -344,6 +345,39 @@ class SignalRunHealthTests(unittest.TestCase):
                     captured_at=datetime(2026, 3, 16, 18, 0, 0),
                 )
             )
+            session.add(
+                StatsSignalSnapshot(
+                    game_id="G1",
+                    player_id="123",
+                    player_name="Test Player",
+                    team_abbreviation="BOS",
+                    opponent_abbreviation="NYK",
+                    stat_type="points",
+                    snapshot_phase="current",
+                    line=24.5,
+                    over_odds=-110,
+                    under_odds=-110,
+                    projected_value=25.0,
+                    edge_over=0.5,
+                    edge_under=-0.5,
+                    over_probability=0.52,
+                    under_probability=0.48,
+                    confidence=0.6,
+                    recommended_side=None,
+                    recent_hit_rate=0.5,
+                    recent_games_count=10,
+                    key_factor="Earlier audit",
+                    is_ready=True,
+                    readiness_status="ready",
+                    using_fallback=False,
+                    readiness_json=SignalReadiness(status="ready", is_ready=True).model_dump_json(),
+                    breakdown_json=PointsBreakdown(base_scoring=25.0, projected_points=25.0).model_dump_json(),
+                    opportunity_json=OpportunityContext(expected_minutes=34.0).model_dump_json(),
+                    features_json=FeatureSnapshot(team_abbreviation="BOS", opponent_abbreviation="NYK", is_home=True).model_dump_json(),
+                    source_prop_captured_at=datetime(2026, 3, 16, 17, 50, 0),
+                    created_at=datetime(2026, 3, 16, 17, 55, 0),
+                )
+            )
 
         ready_row = SimpleNamespace(
             recommended_side="OVER",
@@ -373,6 +407,9 @@ class SignalRunHealthTests(unittest.TestCase):
         self.assertEqual(health.signals_ready, 1)
         self.assertEqual(health.signals_blocked, 1)
         self.assertEqual(health.signals_using_fallback, 1)
+        self.assertEqual(health.latest_persisted_at, datetime(2026, 3, 16, 17, 55, 0))
+        self.assertEqual(health.latest_audit_source_prop_captured_at, datetime(2026, 3, 16, 17, 50, 0))
+        self.assertEqual(health.audit_lag_minutes, 10)
 
 
 class SignalSnapshotPersistenceTests(unittest.TestCase):
@@ -512,6 +549,242 @@ class SignalSnapshotPersistenceTests(unittest.TestCase):
         self.assertEqual(row.readiness_status, "ready")
         self.assertEqual(row.snapshot_phase, "current")
         self.assertEqual(row.source_injury_report_at, datetime(2026, 3, 16, 17, 45, 0))
+
+
+class SignalSnapshotRepairTests(unittest.TestCase):
+    def setUp(self):
+        self.engine = create_engine("sqlite:///:memory:", future=True)
+        self.SessionLocal = sessionmaker(bind=self.engine, autocommit=False, autoflush=False, expire_on_commit=False, class_=Session)
+        Base.metadata.create_all(
+            self.engine,
+            tables=[StatsSignalSnapshot.__table__],
+        )
+
+    def tearDown(self):
+        Base.metadata.drop_all(
+            self.engine,
+            tables=[StatsSignalSnapshot.__table__],
+        )
+        self.engine.dispose()
+
+    @contextmanager
+    def session_scope(self):
+        session = self.SessionLocal()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def _fake_card(self, snapshot: PlayerPropSnapshot, *, created_context_at: datetime | None = None):
+        return SimpleNamespace(
+            snapshot=snapshot,
+            profile=SimpleNamespace(
+                projected_value=26.2,
+                edge_over=1.7,
+                edge_under=-1.7,
+                over_probability=0.61,
+                under_probability=0.39,
+                confidence=0.66,
+                recommended_side="OVER",
+                recent_hit_rate=0.7,
+                recent_games_count=10,
+                key_factor="Recent form is supportive",
+                readiness=SignalReadiness(
+                    is_ready=True,
+                    status="ready",
+                    blockers=[],
+                    warnings=[],
+                    line_age_minutes=0,
+                    minutes_to_tip=90,
+                    using_fallback=False,
+                ),
+                breakdown=PointsBreakdown(
+                    base_scoring=24.8,
+                    recent_form_adjustment=0.7,
+                    minutes_adjustment=0.2,
+                    usage_adjustment=0.3,
+                    efficiency_adjustment=0.1,
+                    opponent_adjustment=0.0,
+                    pace_adjustment=0.0,
+                    context_adjustment=0.1,
+                    expected_minutes=35.0,
+                    expected_usage_pct=0.29,
+                    points_per_minute=0.75,
+                    projected_points=26.2,
+                ),
+                opportunity=OpportunityContext(
+                    expected_minutes=35.0,
+                    season_minutes_avg=34.0,
+                    expected_usage_pct=0.29,
+                    expected_start_rate=1.0,
+                    expected_close_rate=0.8,
+                    role_stability=0.8,
+                    opportunity_score=0.82,
+                    opportunity_confidence=0.77,
+                    availability_modifier=1.0,
+                    vacated_minutes_bonus=0.0,
+                    vacated_usage_bonus=0.0,
+                    injury_entries=[],
+                ),
+                feature_snapshot=FeatureSnapshot(
+                    team_abbreviation="BOS",
+                    opponent_abbreviation="NYK",
+                    is_home=True,
+                    days_rest=1,
+                    back_to_back=False,
+                    sample_size=10,
+                    season_points_avg=24.0,
+                    last10_points_avg=25.0,
+                    last5_points_avg=26.0,
+                    season_minutes_avg=34.0,
+                    last10_minutes_avg=35.0,
+                    last5_minutes_avg=35.5,
+                    season_usage_pct=0.28,
+                    opponent_def_rating=112.0,
+                    opponent_pace=99.0,
+                    team_pace=100.0,
+                    context_source="pregame_context",
+                ),
+                source_context_captured_at=created_context_at,
+                source_injury_report_at=datetime(2026, 3, 16, 17, 45, 0),
+            ),
+        )
+
+    def test_repair_current_signal_snapshots_skips_when_audit_is_current(self):
+        snapshot = PlayerPropSnapshot(
+            id=11,
+            game_id="G1",
+            player_id="123",
+            player_name="Test Player",
+            team="BOS",
+            opponent="NYK",
+            stat_type="points",
+            line=24.5,
+            over_odds=-110,
+            under_odds=-110,
+            is_live=False,
+            snapshot_phase="current",
+            captured_at=datetime(2026, 3, 16, 18, 0, 0),
+        )
+
+        with self.session_scope() as session:
+            session.add(
+                StatsSignalSnapshot(
+                    game_id="G1",
+                    player_id="123",
+                    player_name="Test Player",
+                    team_abbreviation="BOS",
+                    opponent_abbreviation="NYK",
+                    stat_type="points",
+                    snapshot_phase="current",
+                    line=24.5,
+                    over_odds=-110,
+                    under_odds=-110,
+                    projected_value=25.0,
+                    edge_over=0.5,
+                    edge_under=-0.5,
+                    over_probability=0.52,
+                    under_probability=0.48,
+                    confidence=0.6,
+                    recommended_side=None,
+                    recent_hit_rate=0.5,
+                    recent_games_count=10,
+                    key_factor="Current audit",
+                    is_ready=True,
+                    readiness_status="ready",
+                    using_fallback=False,
+                    readiness_json=SignalReadiness(status="ready", is_ready=True).model_dump_json(),
+                    breakdown_json=PointsBreakdown(base_scoring=25.0, projected_points=25.0).model_dump_json(),
+                    opportunity_json=OpportunityContext(expected_minutes=34.0).model_dump_json(),
+                    features_json=FeatureSnapshot(team_abbreviation="BOS", opponent_abbreviation="NYK", is_home=True).model_dump_json(),
+                    source_prop_captured_at=datetime(2026, 3, 16, 18, 0, 0),
+                    created_at=datetime(2026, 3, 16, 18, 5, 0),
+                )
+            )
+
+        with patch("api.services.stats_signal_service.session_scope", self.session_scope), patch(
+            "api.services.stats_signal_service._load_current_snapshots",
+            return_value=[snapshot],
+        ):
+            metrics = repair_current_signal_snapshots()
+
+        self.assertEqual(metrics["repair_performed"], 0)
+        self.assertEqual(metrics["repair_reason"], "up_to_date")
+
+    def test_repair_current_signal_snapshots_replays_when_audit_is_stale(self):
+        snapshot = PlayerPropSnapshot(
+            id=11,
+            game_id="G1",
+            player_id="123",
+            player_name="Test Player",
+            team="BOS",
+            opponent="NYK",
+            stat_type="points",
+            line=24.5,
+            over_odds=-110,
+            under_odds=-110,
+            is_live=False,
+            snapshot_phase="current",
+            captured_at=datetime(2026, 3, 16, 18, 0, 0),
+        )
+        fake_card = self._fake_card(snapshot, created_context_at=datetime(2026, 3, 16, 18, 0, 0))
+
+        with self.session_scope() as session:
+            session.add(
+                StatsSignalSnapshot(
+                    game_id="G1",
+                    player_id="123",
+                    player_name="Test Player",
+                    team_abbreviation="BOS",
+                    opponent_abbreviation="NYK",
+                    stat_type="points",
+                    snapshot_phase="current",
+                    line=24.5,
+                    over_odds=-110,
+                    under_odds=-110,
+                    projected_value=24.9,
+                    edge_over=0.4,
+                    edge_under=-0.4,
+                    over_probability=0.51,
+                    under_probability=0.49,
+                    confidence=0.58,
+                    recommended_side=None,
+                    recent_hit_rate=0.5,
+                    recent_games_count=10,
+                    key_factor="Stale audit",
+                    is_ready=True,
+                    readiness_status="ready",
+                    using_fallback=False,
+                    readiness_json=SignalReadiness(status="ready", is_ready=True).model_dump_json(),
+                    breakdown_json=PointsBreakdown(base_scoring=24.9, projected_points=24.9).model_dump_json(),
+                    opportunity_json=OpportunityContext(expected_minutes=34.0).model_dump_json(),
+                    features_json=FeatureSnapshot(team_abbreviation="BOS", opponent_abbreviation="NYK", is_home=True).model_dump_json(),
+                    source_prop_captured_at=datetime(2026, 3, 16, 17, 40, 0),
+                    created_at=datetime(2026, 3, 16, 17, 45, 0),
+                )
+            )
+
+        with patch("api.services.stats_signal_service.session_scope", self.session_scope), patch(
+            "api.services.stats_signal_service._load_current_snapshots",
+            return_value=[snapshot],
+        ), patch(
+            "api.services.stats_signal_service._build_cards_from_snapshots",
+            return_value=[fake_card],
+        ):
+            metrics = repair_current_signal_snapshots()
+
+        self.assertEqual(metrics["repair_performed"], 1)
+        self.assertEqual(metrics["signal_snapshots"], 1)
+
+        with self.session_scope() as session:
+            rows = session.query(StatsSignalSnapshot).order_by(StatsSignalSnapshot.created_at).all()
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[-1].source_prop_captured_at, datetime(2026, 3, 16, 18, 0, 0))
 
 
 class SignalHistoryLookupTests(unittest.TestCase):

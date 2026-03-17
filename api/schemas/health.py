@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
+
+from pydantic import Field
 
 from api.schemas.base import APIModel
 
@@ -39,7 +42,16 @@ class SignalRunHealth(APIModel):
     signals_limited: int = 0
     signals_blocked: int = 0
     signals_using_fallback: int = 0
+    latest_persisted_at: datetime | None = None
+    latest_audit_source_prop_captured_at: datetime | None = None
+    audit_lag_minutes: int | None = None
     signals_missing_source_game: int = 0
+
+
+class HealthAlert(APIModel):
+    code: str
+    severity: Literal["info", "warning", "critical"]
+    message: str
 
 
 class IngestionHealthResponse(APIModel):
@@ -49,3 +61,4 @@ class IngestionHealthResponse(APIModel):
     injury_reports: InjuryReportsHealth
     pregame_context: PregameContextHealth
     signal_run: SignalRunHealth
+    alerts: list[HealthAlert] = Field(default_factory=list)

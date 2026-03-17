@@ -6,7 +6,10 @@ from typing import Any, Callable
 
 import requests
 
-from api.services.stats_signal_service import persist_current_signal_snapshots
+from api.services.stats_signal_service import (
+    persist_current_signal_snapshots,
+    repair_current_signal_snapshots as repair_current_signal_snapshots_impl,
+)
 from database.db import init_db
 from ingestion.fanduel_client import fetch_current_prop_board
 from ingestion.injury_reports import (
@@ -260,6 +263,18 @@ def _sync_pregame_markets_impl(run_id: int | None = None) -> dict[str, int]:
 
 def sync_pregame_markets() -> dict[str, int]:
     return _run_logged_job("sync_pregame_markets", _sync_pregame_markets_impl)
+
+
+def _repair_current_signal_snapshots_impl(force: bool = False, run_id: int | None = None) -> dict[str, Any]:
+    return repair_current_signal_snapshots_impl(force=force)
+
+
+def repair_current_signal_snapshots(force: bool = False) -> dict[str, Any]:
+    return _run_logged_job(
+        "repair_current_signal_snapshots",
+        _repair_current_signal_snapshots_impl,
+        force,
+    )
 
 
 def _sync_live_state_and_markets_impl(run_id: int | None = None) -> dict[str, Any]:

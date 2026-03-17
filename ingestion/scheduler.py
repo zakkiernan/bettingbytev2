@@ -13,6 +13,7 @@ from ingestion.jobs import (
     bootstrap_backend,
     get_current_mode,
     process_rotation_sync_queue,
+    repair_current_signal_snapshots,
     sync_daily_team_defense,
     sync_live_state_and_markets,
     sync_postgame_enrichment,
@@ -182,6 +183,27 @@ def run_scheduled_pregame_markets_cycle(now_et: datetime | None = None) -> None:
     sync_pregame_markets()
 
 
+def run_signal_snapshot_repair_cycle(now_et: datetime | None = None) -> None:
+    games, _ = get_todays_games_bundle()
+    if not games:
+        logger.info("Skipping signal snapshot repair because there are no games on today's slate")
+        return
+
+    current_time = now_et or datetime.now(tz=SCHEDULER_TIMEZONE)
+    active_window = _select_pregame_market_window(current_time, games)
+    if active_window is None:
+        logger.info("Skipping signal snapshot repair outside the active slate window")
+        return
+
+    window_start, window_end = active_window
+    logger.info(
+        "Running signal snapshot repair for slate window %s to %s ET",
+        window_start.strftime("%Y-%m-%d %H:%M"),
+        window_end.strftime("%Y-%m-%d %H:%M"),
+    )
+    repair_current_signal_snapshots()
+
+
 def _select_due_injury_report_slot(now_et: datetime) -> tuple[date, time]:
     localized_now = now_et.astimezone(SCHEDULER_TIMEZONE) if now_et.tzinfo else now_et.replace(tzinfo=SCHEDULER_TIMEZONE)
     floored_minute = localized_now.minute - (localized_now.minute % OFFICIAL_INJURY_REPORT_INTERVAL_MINUTES)
@@ -306,6 +328,16 @@ def start_scheduler() -> BackgroundScheduler:
         hour="11-23",
         minute="0,15,30,45",
         id="scheduled_pregame_markets_cycle",
+        max_instances=1,
+        coalesce=True,
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        run_signal_snapshot_repair_cycle,
+        "cron",
+        hour="11-23",
+        minute="5,20,35,50",
+        id="signal_snapshot_repair_cycle",
         max_instances=1,
         coalesce=True,
         replace_existing=True,

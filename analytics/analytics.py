@@ -22,6 +22,10 @@ from analytics.evaluation import (
     summarize_opportunity_absence_impact,
     summarize_points_absence_impact,
 )
+from analytics.stats_signal_evaluation import (
+    StatsSignalBacktestResult,
+    backtest_stats_signal_points,
+)
 from analytics.features_opportunity import build_pregame_opportunity_features
 from analytics.opportunity_model import project_pregame_opportunity
 from analytics.pregame_model import MODEL_NAME, MODEL_VERSION, generate_pregame_points_signals
@@ -101,6 +105,10 @@ def run_pregame_opportunity_backtest(*, start_date: datetime | None = None, end_
     return backtest_pregame_opportunity(start_date=start_date, end_date=end_date, min_history=min_history, limit=limit)
 
 
+def run_stats_signal_points_backtest(*, start_date: datetime | None = None, end_date: datetime | None = None, min_history: int = 0, limit: int | None = None) -> StatsSignalBacktestResult:
+    return backtest_stats_signal_points(start_date=start_date, end_date=end_date, min_history=min_history, limit=limit)
+
+
 def build_pregame_points_evaluation_report(*, start_date: datetime | None = None, end_date: datetime | None = None, min_history: int = 8, limit: int | None = None, top_misses: int = 250) -> dict[str, object]:
     result = backtest_pregame_points(start_date=start_date, end_date=end_date, min_history=min_history, limit=limit)
     miss_analysis = analyze_pregame_points_misses(result, top_n=top_misses)
@@ -121,6 +129,14 @@ def build_pregame_opportunity_evaluation_report(*, start_date: datetime | None =
         "summary": result.summary,
         "miss_analysis": miss_analysis,
         "absence_impact_analysis": absence_impact_analysis,
+        "row_count": len(result.rows),
+    }
+
+
+def build_stats_signal_evaluation_report(*, start_date: datetime | None = None, end_date: datetime | None = None, min_history: int = 0, limit: int | None = None) -> dict[str, object]:
+    result = backtest_stats_signal_points(start_date=start_date, end_date=end_date, min_history=min_history, limit=limit)
+    return {
+        "summary": result.summary,
         "row_count": len(result.rows),
     }
 

@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from api.schemas.health import (
+    HealthAlert,
     IngestionHealthResponse,
     InjuryReportsHealth,
     LinesHealth,
@@ -28,6 +29,8 @@ from ingestion.rotation_sync import (
 )
 
 _STALE_CAPTURE_MINUTES = 60
+_SIGNAL_AUDIT_LAG_WARNING_MINUTES = 20
+_SIGNAL_AUDIT_LAG_CRITICAL_MINUTES = 60
 
 
 def _today_window() -> tuple[datetime, datetime]:
@@ -182,6 +185,127 @@ def _build_signal_run_health(
     return stats_signal_service.build_signal_run_health(db, today_game_ids)
 
 
+def _build_health_alerts(
+    *,
+    now: datetime,
+    today_game_ids: list[str],
+    lines: LinesHealth,
+    injury_reports: InjuryReportsHealth,
+    pregame_context: PregameContextHealth,
+    signal_run: SignalRunHealth,
+) -> list[HealthAlert]:
+    alerts: list[HealthAlert] = []
+    today_iso = now.date().isoformat()
+
+    if today_game_ids and lines.tonight_prop_count == 0:
+        alerts.append(
+            HealthAlert(
+                code="lines_missing",
+                severity="critical",
+                message="No pregame prop captures are available for today's slate.",
+            )
+        )
+    elif lines.stale_captures > 0:
+        severity = "critical" if lines.stale_captures == lines.tonight_prop_count else "warning"
+        alerts.append(
+            HealthAlert(
+                code="lines_stale",
+                severity=severity,
+                message=(
+                    f"{lines.stale_captures} pregame prop captures are older than "
+                    f"{_STALE_CAPTURE_MINUTES} minutes."
+                ),
+            )
+        )
+
+    if today_game_ids and injury_reports.latest_report_date != today_iso:
+        alerts.append(
+            HealthAlert(
+                code="injury_reports_stale",
+                severity="critical",
+                message="Official injury reports are not current for today's slate.",
+            )
+        )
+
+    if pregame_context.tonight_games_missing_context > 0:
+        severity = (
+            "critical"
+            if pregame_context.tonight_games_with_context == 0 and today_game_ids
+            else "warning"
+        )
+        alerts.append(
+            HealthAlert(
+                code="pregame_context_missing",
+                severity=severity,
+                message=(
+                    f"{pregame_context.tonight_games_missing_context} slate games are missing "
+                    "persisted pregame context."
+                ),
+            )
+        )
+
+    if signal_run.signals_generated > 0:
+        if signal_run.latest_persisted_at is None:
+            alerts.append(
+                HealthAlert(
+                    code="signal_audit_missing",
+                    severity="critical",
+                    message="Current stats-first signals have not been persisted to the audit trail.",
+                )
+            )
+        elif signal_run.audit_lag_minutes is not None and signal_run.audit_lag_minutes > 0:
+            severity = (
+                "critical"
+                if signal_run.audit_lag_minutes >= _SIGNAL_AUDIT_LAG_CRITICAL_MINUTES
+                else "warning"
+            )
+            if signal_run.audit_lag_minutes >= _SIGNAL_AUDIT_LAG_WARNING_MINUTES:
+                alerts.append(
+                    HealthAlert(
+                        code="signal_audit_lag",
+                        severity=severity,
+                        message=(
+                            "Signal audit snapshots are behind the latest prop captures by "
+                            f"{signal_run.audit_lag_minutes} minutes."
+                        ),
+                    )
+                )
+
+        if signal_run.signals_blocked == signal_run.signals_generated:
+            alerts.append(
+                HealthAlert(
+                    code="signals_all_blocked",
+                    severity="critical",
+                    message="Every current stats-first signal is blocked by readiness gates.",
+                )
+            )
+        elif signal_run.signals_blocked > 0:
+            alerts.append(
+                HealthAlert(
+                    code="signals_partially_blocked",
+                    severity="warning",
+                    message=(
+                        f"{signal_run.signals_blocked} current stats-first signals are blocked "
+                        "by readiness gates."
+                    ),
+                )
+            )
+
+        if signal_run.signals_using_fallback > 0:
+            alerts.append(
+                HealthAlert(
+                    code="signals_using_fallback",
+                    severity="warning",
+                    message=(
+                        f"{signal_run.signals_using_fallback} current stats-first signals are "
+                        "leaning on fallback logic."
+                    ),
+                )
+            )
+
+    return alerts
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -200,11 +324,25 @@ def get_ingestion_health(db: Session) -> IngestionHealthResponse:
     ).all()
     today_game_ids = [row[0] for row in today_game_id_rows]
 
+    lines = _build_lines_health(db, now, today_game_ids)
+    rotations = _build_rotations_health(db)
+    injury_reports = _build_injury_reports_health(db)
+    pregame_context = _build_pregame_context_health(db, today_game_ids)
+    signal_run = _build_signal_run_health(db, today_game_ids)
+
     return IngestionHealthResponse(
         health_captured_at=now,
-        lines=_build_lines_health(db, now, today_game_ids),
-        rotations=_build_rotations_health(db),
-        injury_reports=_build_injury_reports_health(db),
-        pregame_context=_build_pregame_context_health(db, today_game_ids),
-        signal_run=_build_signal_run_health(db, today_game_ids),
+        lines=lines,
+        rotations=rotations,
+        injury_reports=injury_reports,
+        pregame_context=pregame_context,
+        signal_run=signal_run,
+        alerts=_build_health_alerts(
+            now=now,
+            today_game_ids=today_game_ids,
+            lines=lines,
+            injury_reports=injury_reports,
+            pregame_context=pregame_context,
+            signal_run=signal_run,
+        ),
     )

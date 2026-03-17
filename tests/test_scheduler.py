@@ -12,6 +12,7 @@ from ingestion.scheduler import (
     _select_due_injury_report_slot,
     _select_due_snapshot_phase,
     run_prop_snapshot_schedule_cycle,
+    run_signal_snapshot_repair_cycle,
     run_scheduled_official_injury_report_cycle,
     run_scheduled_pregame_markets_cycle,
     run_scheduler_cycle,
@@ -162,6 +163,22 @@ def test_run_scheduled_pregame_markets_cycle_skips_outside_active_window() -> No
     sync_mock.assert_not_called()
 
 
+def test_run_signal_snapshot_repair_cycle_invokes_repair_inside_active_window() -> None:
+    with (
+        patch(
+            "ingestion.scheduler.get_todays_games_bundle",
+            return_value=(
+                [{"game_id": "001", "game_time_utc": datetime(2026, 3, 15, 16, 0, 0, tzinfo=timezone.utc)}],
+                [],
+            ),
+        ),
+        patch("ingestion.scheduler.repair_current_signal_snapshots") as repair_mock,
+    ):
+        run_signal_snapshot_repair_cycle(datetime(2026, 3, 15, 11, 20, 0))
+
+    repair_mock.assert_called_once_with()
+
+
 def test_run_prop_snapshot_schedule_cycle_accepts_aware_tip_times() -> None:
     with (
         patch(
@@ -252,3 +269,9 @@ def test_start_scheduler_registers_official_injury_report_cycle() -> None:
     assert pregame_job["trigger"] == "cron"
     assert pregame_job["kwargs"]["hour"] == "11-23"
     assert pregame_job["kwargs"]["minute"] == "0,15,30,45"
+
+    repair_job = next(job for job in scheduled_jobs if job["kwargs"].get("id") == "signal_snapshot_repair_cycle")
+    assert repair_job["func"] is run_signal_snapshot_repair_cycle
+    assert repair_job["trigger"] == "cron"
+    assert repair_job["kwargs"]["hour"] == "11-23"
+    assert repair_job["kwargs"]["minute"] == "5,20,35,50"

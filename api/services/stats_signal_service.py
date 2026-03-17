@@ -15,15 +15,19 @@ from api.schemas.board import PropBoardMeta, PropBoardResponse, PropBoardRow, Si
 from api.schemas.detail import FeatureSnapshot, GameLogEntry, InjuryEntry, OpportunityContext, PointsBreakdown, PropDetailResponse
 from api.schemas.edges import EdgeResponse
 from api.schemas.health import SignalRunHealth
+from api.schemas.line_movement import LineMovementPoint, LineMovementResponse
+from api.schemas.narrative import AbsenceStoryEntry, LineupContextNarrative, NarrativeContext
 from api.schemas.players import SignalHistoryEntry
 from database.db import session_scope
 from database.models import (
+    AbsenceImpactSummary,
     Game,
     HistoricalGameLog,
     OddsSnapshot,
     OfficialInjuryReport,
     OfficialInjuryReportEntry,
     PlayerPropSnapshot,
+    PregameContextSnapshot,
     StatsSignalSnapshot,
 )
 
@@ -111,6 +115,21 @@ class StatsSignalCard:
     def to_board_row(self) -> PropBoardRow:
         home_abbr = self.game.home_team_abbreviation or "???" if self.game else "???"
         away_abbr = self.game.away_team_abbreviation or "???" if self.game else "???"
+
+        # Extract recent stat values for sparkline display
+        stat_attr = {
+            "points": "points",
+            "rebounds": "rebounds",
+            "assists": "assists",
+            "threes": "threes_made",
+        }.get(self.snapshot.stat_type, "points")
+        recent_values: list[float] | None = None
+        if self.recent_logs:
+            recent_values = [
+                float(getattr(row, stat_attr) or 0.0)
+                for row in self.recent_logs
+            ]
+
         return PropBoardRow(
             signal_id=int(self.snapshot.id),
             game_id=self.snapshot.game_id,
@@ -135,6 +154,7 @@ class StatsSignalCard:
             recent_games_count=self.profile.recent_games_count,
             key_factor=self.profile.key_factor,
             readiness=self.profile.readiness,
+            recent_values=recent_values,
         )
 
     def to_detail_response(self) -> PropDetailResponse:
@@ -335,6 +355,25 @@ def _build_signal_readiness(
         line_age_minutes=line_age_minutes,
         minutes_to_tip=minutes_to_tip,
         using_fallback=using_fallback,
+    )
+
+
+def build_signal_readiness(
+    *,
+    snapshot: PlayerPropSnapshot,
+    game: Game | None,
+    feature: PregamePointsFeatures | None,
+    recent_games_count: int,
+    latest_injury_report_at: datetime | None,
+    evaluation_time: datetime,
+) -> SignalReadiness:
+    return _build_signal_readiness(
+        snapshot=snapshot,
+        game=game,
+        feature=feature,
+        recent_games_count=recent_games_count,
+        latest_injury_report_at=latest_injury_report_at,
+        evaluation_time=evaluation_time,
     )
 
 
@@ -791,6 +830,21 @@ def _build_fallback_profile(
     )
 
 
+def build_fallback_signal_profile(
+    snapshot: PlayerPropSnapshot,
+    game: Game | None,
+    *,
+    recent_logs: list[HistoricalGameLog],
+    injury_entries: list[InjuryEntry],
+) -> StatsSignalProfile:
+    return _build_fallback_profile(
+        snapshot,
+        game,
+        recent_logs=recent_logs,
+        injury_entries=injury_entries,
+    )
+
+
 def _load_recent_logs_by_player(db: Session, player_ids: list[str]) -> dict[str, list[HistoricalGameLog]]:
     unique_player_ids = sorted({player_id for player_id in player_ids if player_id})
     if not unique_player_ids:
@@ -1039,6 +1093,83 @@ def persist_current_signal_snapshots() -> dict[str, int]:
         }
 
 
+def _load_latest_signal_audit_metrics(
+    db: Session,
+    *,
+    game_ids: list[str],
+) -> tuple[datetime | None, datetime | None]:
+    if not game_ids:
+        return None, None
+
+    latest_persisted_at, latest_source_prop_captured_at = db.execute(
+        select(
+            func.max(StatsSignalSnapshot.created_at),
+            func.max(StatsSignalSnapshot.source_prop_captured_at),
+        ).where(
+            StatsSignalSnapshot.game_id.in_(game_ids),
+            StatsSignalSnapshot.snapshot_phase == CURRENT_SNAPSHOT_PHASE,
+            StatsSignalSnapshot.stat_type == POINTS_STAT_TYPE,
+        )
+    ).one()
+    return latest_persisted_at, latest_source_prop_captured_at
+
+
+def repair_current_signal_snapshots(*, force: bool = False) -> dict[str, int | str | None]:
+    generated_at = _utcnow()
+    with session_scope() as db:
+        snapshots = _load_current_snapshots(db)
+        if not snapshots:
+            return {
+                "signal_snapshots": 0,
+                "signal_games": 0,
+                "signal_recommendations": 0,
+                "signal_blocked": 0,
+                "repair_performed": 0,
+                "repair_reason": "no_current_snapshots",
+            }
+
+        scoped_game_ids = sorted({snapshot.game_id for snapshot in snapshots})
+        latest_current_capture = max((snapshot.captured_at for snapshot in snapshots), default=None)
+        _, latest_audit_source_prop_captured_at = _load_latest_signal_audit_metrics(
+            db,
+            game_ids=scoped_game_ids,
+        )
+        audit_lag_minutes = (
+            _age_minutes(latest_current_capture, latest_audit_source_prop_captured_at)
+            if latest_current_capture is not None and latest_audit_source_prop_captured_at is not None
+            else None
+        )
+
+        if (
+            not force
+            and latest_current_capture is not None
+            and latest_audit_source_prop_captured_at is not None
+            and latest_current_capture <= latest_audit_source_prop_captured_at
+        ):
+            return {
+                "signal_snapshots": 0,
+                "signal_games": len(scoped_game_ids),
+                "signal_recommendations": 0,
+                "signal_blocked": 0,
+                "repair_performed": 0,
+                "repair_reason": "up_to_date",
+                "audit_lag_minutes": audit_lag_minutes,
+            }
+
+        cards = _build_cards_from_snapshots(db, snapshots, evaluation_time=generated_at)
+        rows = [_serialize_signal_snapshot(card, created_at=generated_at) for card in cards]
+        db.add_all(rows)
+        return {
+            "signal_snapshots": len(rows),
+            "signal_games": len({row.game_id for row in rows}),
+            "signal_recommendations": sum(1 for row in rows if row.recommended_side is not None),
+            "signal_blocked": sum(1 for row in rows if row.readiness_status == "blocked"),
+            "repair_performed": 1,
+            "repair_reason": "replayed_from_current_snapshots",
+            "audit_lag_minutes": audit_lag_minutes,
+        }
+
+
 def _base_snapshot_query():
     return select(PlayerPropSnapshot).where(
         PlayerPropSnapshot.is_live == False,  # noqa: E712
@@ -1128,7 +1259,15 @@ def get_prop_detail_response(db: Session, snapshot_id: int) -> PropDetailRespons
     if snapshot is None or snapshot.is_live or snapshot.stat_type != POINTS_STAT_TYPE:
         return None
     cards = _build_cards_from_snapshots(db, [snapshot], evaluation_time=_utcnow())
-    return cards[0].to_detail_response() if cards else None
+    if not cards:
+        return None
+    detail = cards[0].to_detail_response()
+
+    # Attach narrative context
+    team_abbr = cards[0].profile.feature_snapshot.team_abbreviation or (snapshot.team or "")
+    detail.narrative = get_narrative_context(db, snapshot.game_id, snapshot.player_id, team_abbr)
+
+    return detail
 
 
 def get_active_prop_rows_for_player(db: Session, player_id: str) -> list[PropBoardRow]:
@@ -1190,14 +1329,26 @@ def build_signal_run_health(db: Session, today_game_ids: list[str]) -> SignalRun
         return SignalRunHealth()
 
     rows = [card.to_board_row() for card in _build_cards_from_snapshots(db, snapshots, evaluation_time=_utcnow())]
+    latest_current_capture = max((snapshot.captured_at for snapshot in snapshots), default=None)
+    latest_persisted_at, latest_audit_source_prop_captured_at = _load_latest_signal_audit_metrics(
+        db,
+        game_ids=today_game_ids,
+    )
     return SignalRunHealth(
-        last_run_at=max((snapshot.captured_at for snapshot in snapshots), default=None),
+        last_run_at=latest_current_capture,
         signals_generated=len(rows),
         signals_with_recommendation=sum(1 for row in rows if row.recommended_side is not None),
         signals_ready=sum(1 for row in rows if row.readiness.status == "ready"),
         signals_limited=sum(1 for row in rows if row.readiness.status == "limited"),
         signals_blocked=sum(1 for row in rows if row.readiness.status == "blocked"),
         signals_using_fallback=sum(1 for row in rows if row.readiness.using_fallback),
+        latest_persisted_at=latest_persisted_at,
+        latest_audit_source_prop_captured_at=latest_audit_source_prop_captured_at,
+        audit_lag_minutes=(
+            _age_minutes(latest_current_capture, latest_audit_source_prop_captured_at)
+            if latest_current_capture is not None and latest_audit_source_prop_captured_at is not None
+            else None
+        ),
         signals_missing_source_game=0,
     )
 
@@ -1331,3 +1482,177 @@ def get_player_signal_history(
             )
         )
     return history
+
+
+# ---------------------------------------------------------------------------
+# Line movement
+# ---------------------------------------------------------------------------
+
+
+def get_line_movement(db: Session, snapshot_id: int) -> LineMovementResponse | None:
+    """Return all odds snapshots for a prop, showing how the line moved over time."""
+    snapshot = db.get(PlayerPropSnapshot, snapshot_id)
+    if snapshot is None:
+        return None
+
+    odds_rows = (
+        db.execute(
+            select(OddsSnapshot)
+            .where(
+                OddsSnapshot.game_id == snapshot.game_id,
+                OddsSnapshot.player_id == snapshot.player_id,
+                OddsSnapshot.stat_type == snapshot.stat_type,
+            )
+            .order_by(OddsSnapshot.captured_at.asc())
+        )
+        .scalars()
+        .all()
+    )
+
+    snapshots_list = [
+        LineMovementPoint(
+            captured_at=row.captured_at,
+            line=float(row.line),
+            over_odds=int(row.over_odds),
+            under_odds=int(row.under_odds),
+            market_phase=row.market_phase or "pregame",
+        )
+        for row in odds_rows
+    ]
+
+    opening_line = snapshots_list[0].line if snapshots_list else None
+    current_line = float(snapshot.line)
+
+    return LineMovementResponse(
+        signal_id=snapshot_id,
+        game_id=snapshot.game_id,
+        player_id=snapshot.player_id,
+        player_name=snapshot.player_name,
+        stat_type=snapshot.stat_type,
+        current_line=current_line,
+        opening_line=opening_line,
+        line_movement=round(current_line - opening_line, 1) if opening_line is not None else None,
+        snapshots=snapshots_list,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Narrative context
+# ---------------------------------------------------------------------------
+
+
+def get_narrative_context(
+    db: Session,
+    game_id: str,
+    player_id: str,
+    team_abbreviation: str,
+) -> NarrativeContext:
+    """Build narrative context for a signal: lineup intel + absence impact stories."""
+
+    # --- Lineup context from PregameContextSnapshot ---
+    lineup_context: LineupContextNarrative | None = None
+
+    latest_capture = db.execute(
+        select(func.max(PregameContextSnapshot.captured_at)).where(
+            PregameContextSnapshot.game_id == game_id,
+            PregameContextSnapshot.player_id == player_id,
+        )
+    ).scalar()
+
+    if latest_capture:
+        ctx = db.execute(
+            select(PregameContextSnapshot).where(
+                PregameContextSnapshot.game_id == game_id,
+                PregameContextSnapshot.player_id == player_id,
+                PregameContextSnapshot.captured_at == latest_capture,
+            )
+        ).scalars().first()
+
+        if ctx:
+            top7 = int(ctx.teammate_out_count_top7 or 0)
+            depletion = "none"
+            if top7 >= 3:
+                depletion = "severe"
+            elif top7 >= 1:
+                depletion = "moderate"
+
+            lineup_context = LineupContextNarrative(
+                expected_start=ctx.expected_start,
+                starter_confidence=ctx.starter_confidence,
+                late_scratch_risk=ctx.late_scratch_risk,
+                missing_teammates_top7=top7,
+                missing_high_usage_teammates=int(ctx.missing_high_usage_teammates or 0),
+                missing_primary_ballhandler=ctx.missing_primary_ballhandler,
+                missing_frontcourt_rotation_piece=ctx.missing_frontcourt_rotation_piece,
+                vacated_minutes_proxy=ctx.vacated_minutes_proxy,
+                vacated_usage_proxy=ctx.vacated_usage_proxy,
+                pregame_context_confidence=ctx.pregame_context_confidence,
+                projected_lineup_confirmed=ctx.projected_lineup_confirmed,
+                rotation_depletion=depletion,
+            )
+
+    # --- Absence stories: cross-reference AbsenceImpactSummary with injury report ---
+    absence_stories: list[AbsenceStoryEntry] = []
+
+    # Find today's game date for injury lookup
+    game = db.get(Game, game_id)
+    if game and game.game_date:
+        game_dt = game.game_date.date() if hasattr(game.game_date, "date") else game.game_date
+
+        # Get players currently OUT or Doubtful on the same team
+        out_entries = (
+            db.execute(
+                select(OfficialInjuryReportEntry)
+                .where(
+                    OfficialInjuryReportEntry.team_abbreviation == team_abbreviation,
+                    OfficialInjuryReportEntry.game_date == game_dt,
+                    OfficialInjuryReportEntry.current_status.in_(["Out", "Doubtful"]),
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+        out_player_ids = {e.player_id for e in out_entries if e.player_id}
+
+        if out_player_ids:
+            # Get impact rows where this player is the beneficiary and the source is out
+            impact_rows = (
+                db.execute(
+                    select(AbsenceImpactSummary)
+                    .where(
+                        AbsenceImpactSummary.beneficiary_player_id == player_id,
+                        AbsenceImpactSummary.source_player_id.in_(out_player_ids),
+                    )
+                    .order_by(func.abs(AbsenceImpactSummary.impact_score).desc())
+                    .limit(5)
+                )
+                .scalars()
+                .all()
+            )
+
+            out_status_map = {
+                e.player_id: e.current_status
+                for e in out_entries if e.player_id
+            }
+
+            for row in impact_rows:
+                absence_stories.append(
+                    AbsenceStoryEntry(
+                        absent_player_name=row.source_player_name,
+                        absent_player_id=row.source_player_id,
+                        current_status=out_status_map.get(row.source_player_id),
+                        points_delta=row.points_delta,
+                        minutes_delta=row.minutes_delta,
+                        usage_delta=row.usage_delta,
+                        rebounds_delta=row.rebounds_delta,
+                        assists_delta=row.assists_delta,
+                        games_count=row.source_out_game_count,
+                        sample_confidence=row.sample_confidence,
+                    )
+                )
+
+    return NarrativeContext(
+        lineup_context=lineup_context,
+        absence_stories=absence_stories,
+    )

@@ -17,6 +17,11 @@ from analytics.evaluation import (
     summarize_points_absence_impact,
 )
 from analytics.injury_report_loader import get_official_team_summary, match_official_injury_row
+from analytics.stats_signal_evaluation import (
+    StatsSignalBacktestRow,
+    summarize_stats_signal_decisions,
+    summarize_stats_signal_profile_buckets,
+)
 
 
 class HistoricalInjuryEvaluationTests(unittest.TestCase):
@@ -322,6 +327,212 @@ class HistoricalOddsEvaluationTests(unittest.TestCase):
         self.assertEqual(summary['minutes_affected_minutes_mae'], 14.0)
         self.assertEqual(summary['unaffected_minutes_mae'], 1.0)
         self.assertTrue(any(bucket.label == '0.65+' for bucket in summary['confidence_buckets']))
+
+    def test_summarize_stats_signal_decisions_tracks_calibration_gap(self):
+        rows = [
+            StatsSignalBacktestRow(
+                game_id="G1",
+                game_date=datetime(2026, 1, 1),
+                player_id="1",
+                player_name="A",
+                team_abbreviation="BOS",
+                opponent_abbreviation="NYK",
+                projected_points=26.0,
+                actual_points=29.0,
+                actual_minutes=35.0,
+                expected_minutes=34.0,
+                error=-3.0,
+                abs_error=3.0,
+                line=24.5,
+                line_available=True,
+                over_probability=0.64,
+                under_probability=0.36,
+                recommended_probability=0.64,
+                edge_over=1.5,
+                edge_under=-1.5,
+                confidence=0.61,
+                recommended_side="OVER",
+                line_delta=4.5,
+                recommended_outcome="win",
+                recent_hit_rate=0.7,
+                recent_games_count=10,
+                key_factor=None,
+                pregame_context_attached=True,
+                official_injury_attached=True,
+                context_source="pregame_context",
+                readiness_status="ready",
+                readiness_blocker_count=0,
+                readiness_warning_count=0,
+                using_fallback=False,
+                breakdown={"expected_minutes": 34.0},
+            ),
+            StatsSignalBacktestRow(
+                game_id="G2",
+                game_date=datetime(2026, 1, 2),
+                player_id="2",
+                player_name="B",
+                team_abbreviation="BOS",
+                opponent_abbreviation="MIA",
+                projected_points=22.0,
+                actual_points=25.0,
+                actual_minutes=31.0,
+                expected_minutes=30.0,
+                error=-3.0,
+                abs_error=3.0,
+                line=23.5,
+                line_available=True,
+                over_probability=0.43,
+                under_probability=0.57,
+                recommended_probability=0.57,
+                edge_over=-1.5,
+                edge_under=1.5,
+                confidence=0.72,
+                recommended_side="UNDER",
+                line_delta=1.5,
+                recommended_outcome="loss",
+                recent_hit_rate=0.4,
+                recent_games_count=10,
+                key_factor=None,
+                pregame_context_attached=False,
+                official_injury_attached=True,
+                context_source="official_injury_team",
+                readiness_status="limited",
+                readiness_blocker_count=0,
+                readiness_warning_count=1,
+                using_fallback=False,
+                breakdown={"expected_minutes": 30.0},
+            ),
+        ]
+
+        summary = summarize_stats_signal_decisions(rows)
+
+        self.assertEqual(summary.recommendation_count, 2)
+        self.assertEqual(summary.win_count, 1)
+        self.assertEqual(summary.loss_count, 1)
+        self.assertAlmostEqual(summary.hit_rate, 0.5)
+        self.assertAlmostEqual(summary.implied_hit_rate, 0.605)
+        self.assertAlmostEqual(summary.calibration_gap, -0.105)
+        self.assertTrue(any(bucket.label == "60-70%" for bucket in summary.confidence_buckets))
+
+    def test_summarize_stats_signal_profile_buckets_groups_by_expected_minutes(self):
+        rows = [
+            StatsSignalBacktestRow(
+                game_id="G1",
+                game_date=datetime(2026, 1, 1),
+                player_id="1",
+                player_name="A",
+                team_abbreviation="BOS",
+                opponent_abbreviation="NYK",
+                projected_points=14.0,
+                actual_points=13.0,
+                actual_minutes=20.0,
+                expected_minutes=22.0,
+                error=1.0,
+                abs_error=1.0,
+                line=12.5,
+                line_available=True,
+                over_probability=0.58,
+                under_probability=0.42,
+                recommended_probability=0.58,
+                edge_over=1.5,
+                edge_under=-1.5,
+                confidence=0.59,
+                recommended_side="OVER",
+                line_delta=0.5,
+                recommended_outcome="win",
+                recent_hit_rate=0.6,
+                recent_games_count=8,
+                key_factor=None,
+                pregame_context_attached=True,
+                official_injury_attached=False,
+                context_source="pregame_context",
+                readiness_status="ready",
+                readiness_blocker_count=0,
+                readiness_warning_count=0,
+                using_fallback=False,
+                breakdown={"expected_minutes": 22.0},
+            ),
+            StatsSignalBacktestRow(
+                game_id="G2",
+                game_date=datetime(2026, 1, 2),
+                player_id="2",
+                player_name="B",
+                team_abbreviation="BOS",
+                opponent_abbreviation="MIA",
+                projected_points=25.0,
+                actual_points=23.0,
+                actual_minutes=31.0,
+                expected_minutes=30.0,
+                error=2.0,
+                abs_error=2.0,
+                line=24.5,
+                line_available=True,
+                over_probability=0.55,
+                under_probability=0.45,
+                recommended_probability=0.55,
+                edge_over=0.5,
+                edge_under=-0.5,
+                confidence=0.6,
+                recommended_side="OVER",
+                line_delta=-1.5,
+                recommended_outcome="loss",
+                recent_hit_rate=0.5,
+                recent_games_count=10,
+                key_factor=None,
+                pregame_context_attached=True,
+                official_injury_attached=True,
+                context_source="pregame_context",
+                readiness_status="ready",
+                readiness_blocker_count=0,
+                readiness_warning_count=0,
+                using_fallback=False,
+                breakdown={"expected_minutes": 30.0},
+            ),
+            StatsSignalBacktestRow(
+                game_id="G3",
+                game_date=datetime(2026, 1, 3),
+                player_id="3",
+                player_name="C",
+                team_abbreviation="BOS",
+                opponent_abbreviation="PHI",
+                projected_points=29.0,
+                actual_points=28.0,
+                actual_minutes=36.0,
+                expected_minutes=34.0,
+                error=1.0,
+                abs_error=1.0,
+                line=27.5,
+                line_available=True,
+                over_probability=0.57,
+                under_probability=0.43,
+                recommended_probability=None,
+                edge_over=1.5,
+                edge_under=-1.5,
+                confidence=0.62,
+                recommended_side=None,
+                line_delta=0.5,
+                recommended_outcome=None,
+                recent_hit_rate=0.6,
+                recent_games_count=10,
+                key_factor=None,
+                pregame_context_attached=False,
+                official_injury_attached=False,
+                context_source="none",
+                readiness_status="blocked",
+                readiness_blocker_count=1,
+                readiness_warning_count=0,
+                using_fallback=True,
+                breakdown={"expected_minutes": 34.0},
+            ),
+        ]
+
+        buckets = summarize_stats_signal_profile_buckets(rows)
+
+        by_label = {bucket.label: bucket for bucket in buckets}
+        self.assertEqual(by_label["under_24m"].sample_size, 1)
+        self.assertEqual(by_label["24_to_32m"].recommendation_count, 1)
+        self.assertEqual(by_label["32m_plus"].sample_size, 1)
+        self.assertEqual(by_label["32m_plus"].recommendation_count, 0)
 
 
 if __name__ == '__main__':
