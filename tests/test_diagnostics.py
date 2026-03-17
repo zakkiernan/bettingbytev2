@@ -42,6 +42,8 @@ class PregameDiagnosticsTests(unittest.TestCase):
             opponent_adjustment=0.1,
             recent_form_adjustment=0.2,
             pregame_context_attached=True,
+            official_injury_attached=True,
+            context_source="pregame_context",
             line_available=True,
         )
         without_line = SimpleNamespace(
@@ -57,6 +59,8 @@ class PregameDiagnosticsTests(unittest.TestCase):
             opponent_adjustment=0.1,
             recent_form_adjustment=0.2,
             pregame_context_attached=False,
+            official_injury_attached=True,
+            context_source="official_injury_player",
             line_available=False,
         )
 
@@ -64,9 +68,12 @@ class PregameDiagnosticsTests(unittest.TestCase):
 
         self.assertEqual(analysis.line_available_count, 1)
         self.assertEqual(analysis.line_missing_count, 1)
+        self.assertEqual(analysis.official_injury_attached_count, 2)
+        self.assertEqual(analysis.injury_only_context_count, 1)
         self.assertEqual(analysis.with_line_buckets[0].label, "minutes_shortfall")
         self.assertEqual(analysis.without_line_buckets[0].label, "mixed")
-        self.assertTrue(analysis.examples[0]["line_available"] )
+        self.assertTrue(analysis.examples[0]["line_available"])
+        self.assertIn("context_source", analysis.examples[0])
 
 
 
@@ -91,6 +98,9 @@ class PregameDiagnosticsTests(unittest.TestCase):
             actual_passes=38.0,
             opportunity_score=0.63,
             confidence=0.58,
+            pregame_context_attached=True,
+            official_injury_attached=True,
+            context_source="pregame_context",
         )
         usage_miss = SimpleNamespace(
             player_name="Usage Miss",
@@ -112,6 +122,9 @@ class PregameDiagnosticsTests(unittest.TestCase):
             actual_passes=30.0,
             opportunity_score=0.57,
             confidence=0.49,
+            pregame_context_attached=False,
+            official_injury_attached=True,
+            context_source="official_injury_team",
         )
 
         analysis = analyze_pregame_opportunity_misses(SimpleNamespace(rows=[start_miss, usage_miss]), top_n=10)
@@ -120,6 +133,9 @@ class PregameDiagnosticsTests(unittest.TestCase):
         self.assertIn("start_role_miss", labels)
         self.assertIn("usage_miss", labels)
         self.assertEqual(analysis.examples[0]["category"], "start_role_miss")
+        self.assertEqual(analysis.official_injury_attached_count, 2)
+        self.assertEqual(analysis.injury_only_context_count, 1)
+        self.assertIn("context_source", analysis.examples[0])
 
 
 if __name__ == "__main__":

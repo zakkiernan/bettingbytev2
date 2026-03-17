@@ -53,6 +53,7 @@ class RotationBundleResult:
     team_rotation_games: list[dict[str, Any]] = field(default_factory=list)
     player_rotation_games: list[dict[str, Any]] = field(default_factory=list)
     payloads: list[dict[str, Any]] = field(default_factory=list)
+    coverage_metrics: dict[str, Any] = field(default_factory=dict)
     error_type: str | None = None
     error_text: str | None = None
     error_details: dict[str, Any] = field(default_factory=dict)
@@ -491,6 +492,14 @@ def _normalize_scraped_game(game_id: str, raw_payload: dict[str, Any]) -> Rotati
         team_rotation_games=team_rotation_games,
         player_rotation_games=player_rotation_games,
         payloads=payloads,
+        coverage_metrics={
+            "expected_player_count": expected_player_count,
+            "historical_player_count": int(context["away"]["historical_player_count"]) + int(context["home"]["historical_player_count"]),
+            "mapped_player_count": mapped_player_count,
+            "covered_player_count": covered_player_count,
+            "zero_window_player_count": len(zero_window_players),
+            "expected_minutes_floor": ROTATION_EXPECTED_MINUTES_FLOOR,
+        },
     )
 
 

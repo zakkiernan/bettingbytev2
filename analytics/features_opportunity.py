@@ -16,6 +16,7 @@ from analytics.injury_report_loader import (
     load_latest_official_injury_report_rows,
     match_official_injury_row,
 )
+from analytics.name_matching import normalize_name
 from analytics.pregame_context_loader import (
     PregameContextIndex,
     build_pregame_context_index,
@@ -25,6 +26,7 @@ from analytics.pregame_context_loader import (
 )
 from database.db import session_scope
 from database.models import (
+    AbsenceImpactSummary,
     Game,
     HistoricalAdvancedLog,
     HistoricalGameLog,
@@ -36,6 +38,23 @@ from database.models import (
 
 
 @dataclass(slots=True)
+class TeamPlayerRoleProfile:
+    player_id: str
+    baseline_minutes: float
+    baseline_usage: float
+    baseline_passes: float
+    baseline_touches: float
+    baseline_rebounds: float
+    baseline_blocks: float
+    baseline_threes: float
+    start_rate: float
+    close_rate: float
+    ballhandler_score: float
+    usage_score: float
+    frontcourt_score: float
+
+
+@dataclass(slots=True)
 class TeamRolePrior:
     team_id: str
     team_abbreviation: str
@@ -43,8 +62,16 @@ class TeamRolePrior:
     top9_player_ids: set[str]
     high_usage_player_ids: set[str]
     primary_ballhandler_ids: set[str]
+    frontcourt_player_ids: set[str]
+    player_role_profiles: dict[str, TeamPlayerRoleProfile]
     baseline_minutes_by_player_id: dict[str, float]
     baseline_usage_by_player_id: dict[str, float]
+
+
+@dataclass(slots=True)
+class AbsenceImpactIndex:
+    by_team_beneficiary_source_id: dict[tuple[str, str, str], AbsenceImpactSummary]
+    by_team_beneficiary_source_name: dict[tuple[str, str, str], AbsenceImpactSummary]
 
 
 @dataclass(slots=True)
@@ -138,10 +165,22 @@ class PregameOpportunityFeatures:
     missing_frontcourt_rotation_piece: bool | None = None
     vacated_minutes_proxy: float | None = None
     vacated_usage_proxy: float | None = None
+    role_replacement_minutes_proxy: float | None = None
+    role_replacement_usage_proxy: float | None = None
+    role_replacement_touches_proxy: float | None = None
+    role_replacement_passes_proxy: float | None = None
+    absence_impact_minutes_delta: float | None = None
+    absence_impact_usage_delta: float | None = None
+    absence_impact_touches_delta: float | None = None
+    absence_impact_passes_delta: float | None = None
+    absence_impact_sample_confidence: float | None = None
+    absence_impact_source_count: float | None = None
     projected_lineup_confirmed: bool | None = None
     official_starter_flag: bool | None = None
     pregame_context_confidence: float | None = None
     pregame_context_attached: bool | None = None
+    official_injury_attached: bool | None = None
+    context_source: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -175,9 +214,20 @@ class PregameFeatureSeed:
     official_injury_row: dict[str, Any] | None = None
     official_injury_team_summary: dict[str, Any] | None = None
     official_injury_team_rows: list[dict[str, Any]] | None = None
+    absence_impact_index: AbsenceImpactIndex | None = None
     team_role_prior: TeamRolePrior | None = None
 
     def build_opportunity_features(self) -> PregameOpportunityFeatures:
+        official_injury_attached = _has_official_injury_context(
+            official_injury_row=self.official_injury_row,
+            official_injury_team_summary=self.official_injury_team_summary,
+            official_injury_team_rows=self.official_injury_team_rows,
+        )
+        context_source = _resolve_context_source(
+            pregame_context_row=self.pregame_context_row,
+            official_injury_attached=official_injury_attached,
+            official_injury_row=self.official_injury_row,
+        )
         context_aggregates = _merge_context_aggregates(
             _build_pregame_context_aggregates(self.pregame_context_row),
             _build_official_injury_aggregates(
@@ -186,9 +236,12 @@ class PregameFeatureSeed:
                 team_rows=self.official_injury_team_rows,
                 team_role_prior=self.team_role_prior,
                 player_id=self.player_id,
+                team_abbreviation=self.team_abbreviation,
+                absence_impact_index=self.absence_impact_index,
                 captured_at=self.captured_at,
             ),
         )
+        context_aggregates = _apply_context_source_confidence_cap(context_aggregates, context_source=context_source)
         return PregameOpportunityFeatures(
             game_id=self.game_id,
             player_id=self.player_id,
@@ -210,6 +263,8 @@ class PregameFeatureSeed:
             league_avg_pace=self.league_avg_pace,
             league_avg_opponent_points=self.league_avg_opponent_points,
             pregame_context_attached=self.pregame_context_row is not None,
+            official_injury_attached=official_injury_attached,
+            context_source=context_source,
             **_build_shared_log_aggregates(self.recent_logs),
             **_build_rotation_aggregates(self.rotation_rows),
             **_build_shared_advanced_aggregates(self.advanced_rows),
@@ -403,6 +458,25 @@ def _build_shared_advanced_aggregates(rows: list[HistoricalAdvancedLog]) -> dict
     }
 
 
+def _player_role_similarity(target: TeamPlayerRoleProfile, missing: TeamPlayerRoleProfile) -> float:
+    ballhandler_similarity = 1.0 - min(abs(target.ballhandler_score - missing.ballhandler_score), 1.0)
+    usage_similarity = 1.0 - min(abs(target.usage_score - missing.usage_score), 1.0)
+    frontcourt_similarity = 1.0 - min(abs(target.frontcourt_score - missing.frontcourt_score), 1.0)
+    start_similarity = 1.0 - min(abs(target.start_rate - missing.start_rate), 1.0)
+    close_similarity = 1.0 - min(abs(target.close_rate - missing.close_rate), 1.0)
+    return max(
+        0.0,
+        min(
+            1.0,
+            0.34 * frontcourt_similarity
+            + 0.26 * ballhandler_similarity
+            + 0.18 * usage_similarity
+            + 0.12 * start_similarity
+            + 0.10 * close_similarity,
+        ),
+    )
+
+
 def _build_team_role_prior_from_rows(
     *,
     team_id: str,
@@ -418,12 +492,21 @@ def _build_team_role_prior_from_rows(
     usage_by_player: dict[str, list[float]] = defaultdict(list)
     passes_by_player: dict[str, list[float]] = defaultdict(list)
     touches_by_player: dict[str, list[float]] = defaultdict(list)
+    rebounds_by_player: dict[str, list[float]] = defaultdict(list)
+    blocks_by_player: dict[str, list[float]] = defaultdict(list)
+    threes_by_player: dict[str, list[float]] = defaultdict(list)
     start_flags_by_player: dict[str, list[float]] = defaultdict(list)
     close_flags_by_player: dict[str, list[float]] = defaultdict(list)
 
     for log in logs:
         if log.minutes is not None:
             minutes_by_player[log.player_id].append(float(log.minutes))
+        if log.rebounds is not None:
+            rebounds_by_player[log.player_id].append(float(log.rebounds))
+        if log.blocks is not None:
+            blocks_by_player[log.player_id].append(float(log.blocks))
+        if log.threes_made is not None:
+            threes_by_player[log.player_id].append(float(log.threes_made))
 
     for row in advanced_rows:
         if row.usage_percentage is not None:
@@ -447,6 +530,9 @@ def _build_team_role_prior_from_rows(
     baseline_usage = {player_id: _mean(values) or 0.0 for player_id, values in usage_by_player.items()}
     baseline_passes = {player_id: _mean(values) or 0.0 for player_id, values in passes_by_player.items()}
     baseline_touches = {player_id: _mean(values) or 0.0 for player_id, values in touches_by_player.items()}
+    baseline_rebounds = {player_id: _mean(values) or 0.0 for player_id, values in rebounds_by_player.items()}
+    baseline_blocks = {player_id: _mean(values) or 0.0 for player_id, values in blocks_by_player.items()}
+    baseline_threes = {player_id: _mean(values) or 0.0 for player_id, values in threes_by_player.items()}
     start_rates = {player_id: _mean(values) or 0.0 for player_id, values in start_flags_by_player.items()}
     close_rates = {player_id: _mean(values) or 0.0 for player_id, values in close_flags_by_player.items()}
 
@@ -466,6 +552,52 @@ def _build_team_role_prior_from_rows(
         key=lambda player_id: (baseline_passes.get(player_id, 0.0) * 0.7) + (baseline_touches.get(player_id, 0.0) * 0.3),
         reverse=True,
     )
+    frontcourt_rank = sorted(
+        player_ids,
+        key=lambda player_id: (
+            baseline_rebounds.get(player_id, 0.0) * 0.70
+            + baseline_blocks.get(player_id, 0.0) * 2.0
+            - baseline_threes.get(player_id, 0.0) * 0.15
+        ),
+        reverse=True,
+    )
+
+    max_usage = max((baseline_usage.get(player_id, 0.0) for player_id in player_ids), default=0.0)
+    max_passes = max((baseline_passes.get(player_id, 0.0) for player_id in player_ids), default=0.0)
+    max_touches = max((baseline_touches.get(player_id, 0.0) for player_id in player_ids), default=0.0)
+    max_frontcourt_raw = max(
+        (
+            baseline_rebounds.get(player_id, 0.0) * 0.70
+            + baseline_blocks.get(player_id, 0.0) * 2.0
+            - baseline_threes.get(player_id, 0.0) * 0.15
+            for player_id in player_ids
+        ),
+        default=0.0,
+    )
+
+    player_role_profiles: dict[str, TeamPlayerRoleProfile] = {}
+    for player_id in player_ids:
+        ballhandler_raw = baseline_passes.get(player_id, 0.0) * 0.7 + baseline_touches.get(player_id, 0.0) * 0.3
+        frontcourt_raw = (
+            baseline_rebounds.get(player_id, 0.0) * 0.70
+            + baseline_blocks.get(player_id, 0.0) * 2.0
+            - baseline_threes.get(player_id, 0.0) * 0.15
+        )
+        player_role_profiles[player_id] = TeamPlayerRoleProfile(
+            player_id=player_id,
+            baseline_minutes=baseline_minutes.get(player_id, 0.0),
+            baseline_usage=baseline_usage.get(player_id, 0.0),
+            baseline_passes=baseline_passes.get(player_id, 0.0),
+            baseline_touches=baseline_touches.get(player_id, 0.0),
+            baseline_rebounds=baseline_rebounds.get(player_id, 0.0),
+            baseline_blocks=baseline_blocks.get(player_id, 0.0),
+            baseline_threes=baseline_threes.get(player_id, 0.0),
+            start_rate=start_rates.get(player_id, 0.0),
+            close_rate=close_rates.get(player_id, 0.0),
+            ballhandler_score=(ballhandler_raw / max(ballhandler_raw, max_passes * 0.7 + max_touches * 0.3, 1.0)),
+            usage_score=(baseline_usage.get(player_id, 0.0) / max(max_usage, 0.01)),
+            frontcourt_score=max(0.0, frontcourt_raw) / max(max(max_frontcourt_raw, 0.0), 1.0),
+        )
 
     return TeamRolePrior(
         team_id=team_id,
@@ -474,6 +606,8 @@ def _build_team_role_prior_from_rows(
         top9_player_ids=set(role_rank[:9]),
         high_usage_player_ids=set(usage_rank[: min(4, len(usage_rank))]),
         primary_ballhandler_ids=set(ballhandler_rank[: min(2, len(ballhandler_rank))]),
+        frontcourt_player_ids=set(frontcourt_rank[: min(4, len(frontcourt_rank))]),
+        player_role_profiles=player_role_profiles,
         baseline_minutes_by_player_id=baseline_minutes,
         baseline_usage_by_player_id=baseline_usage,
     )
@@ -625,6 +759,10 @@ def _build_role_based_official_injury_context(
         "missing_frontcourt_rotation_piece": None,
         "vacated_minutes_proxy": None,
         "vacated_usage_proxy": None,
+        "role_replacement_minutes_proxy": None,
+        "role_replacement_usage_proxy": None,
+        "role_replacement_touches_proxy": None,
+        "role_replacement_passes_proxy": None,
     }
     if not team_rows or team_role_prior is None:
         return base
@@ -640,9 +778,16 @@ def _build_role_based_official_injury_context(
     teammate_out_count_top9 = 0.0
     missing_high_usage_teammates = 0.0
     missing_primary_ballhandler = False
+    missing_frontcourt_rotation_piece = False
     vacated_minutes_proxy = 0.0
     vacated_usage_proxy = 0.0
+    role_replacement_minutes_proxy = 0.0
+    role_replacement_usage_proxy = 0.0
+    role_replacement_touches_proxy = 0.0
+    role_replacement_passes_proxy = 0.0
     saw_role_signal = False
+
+    target_profile = team_role_prior.player_role_profiles.get(str(player_id)) if player_id is not None else None
 
     for row in team_rows:
         teammate_id = row.get("player_id")
@@ -666,11 +811,27 @@ def _build_role_based_official_injury_context(
         if teammate_key in team_role_prior.primary_ballhandler_ids and severity >= 0.35:
             missing_primary_ballhandler = True
             saw_role_signal = True
+        if teammate_key in team_role_prior.frontcourt_player_ids and severity >= 0.35:
+            missing_frontcourt_rotation_piece = True
+            saw_role_signal = True
+
+        missing_profile = team_role_prior.player_role_profiles.get(teammate_key)
+        if target_profile is not None and missing_profile is not None:
+            replacement_fit = _player_role_similarity(target_profile, missing_profile)
+            role_replacement_minutes_proxy += missing_profile.baseline_minutes * severity * replacement_fit
+            role_replacement_usage_proxy += missing_profile.baseline_usage * severity * replacement_fit
+            role_replacement_touches_proxy += missing_profile.baseline_touches * severity * replacement_fit
+            role_replacement_passes_proxy += missing_profile.baseline_passes * severity * replacement_fit
 
         vacated_minutes_proxy += team_role_prior.baseline_minutes_by_player_id.get(teammate_key, 0.0) * severity
         vacated_usage_proxy += team_role_prior.baseline_usage_by_player_id.get(teammate_key, 0.0) * severity
 
-    if not saw_role_signal and vacated_minutes_proxy <= 0.0 and vacated_usage_proxy <= 0.0:
+    if (
+        not saw_role_signal
+        and vacated_minutes_proxy <= 0.0
+        and vacated_usage_proxy <= 0.0
+        and role_replacement_minutes_proxy <= 0.0
+    ):
         return base
 
     return {
@@ -678,10 +839,156 @@ def _build_role_based_official_injury_context(
         "teammate_out_count_top9": round(teammate_out_count_top9, 4),
         "missing_high_usage_teammates": round(missing_high_usage_teammates, 4),
         "missing_primary_ballhandler": missing_primary_ballhandler,
-        "missing_frontcourt_rotation_piece": None,
+        "missing_frontcourt_rotation_piece": missing_frontcourt_rotation_piece if missing_frontcourt_rotation_piece else None,
         "vacated_minutes_proxy": round(vacated_minutes_proxy, 4) if vacated_minutes_proxy > 0.0 else None,
         "vacated_usage_proxy": round(vacated_usage_proxy, 4) if vacated_usage_proxy > 0.0 else None,
+        "role_replacement_minutes_proxy": round(role_replacement_minutes_proxy, 4) if role_replacement_minutes_proxy > 0.0 else None,
+        "role_replacement_usage_proxy": round(role_replacement_usage_proxy, 4) if role_replacement_usage_proxy > 0.0 else None,
+        "role_replacement_touches_proxy": round(role_replacement_touches_proxy, 4) if role_replacement_touches_proxy > 0.0 else None,
+        "role_replacement_passes_proxy": round(role_replacement_passes_proxy, 4) if role_replacement_passes_proxy > 0.0 else None,
     }
+
+
+def _select_newer_absence_impact_row(
+    current: AbsenceImpactSummary | None,
+    candidate: AbsenceImpactSummary,
+) -> AbsenceImpactSummary:
+    if current is None:
+        return candidate
+
+    current_end = current.window_end_date or date.min
+    candidate_end = candidate.window_end_date or date.min
+    if candidate_end != current_end:
+        return candidate if candidate_end > current_end else current
+
+    current_confidence = float(current.sample_confidence or 0.0)
+    candidate_confidence = float(candidate.sample_confidence or 0.0)
+    if candidate_confidence != current_confidence:
+        return candidate if candidate_confidence > current_confidence else current
+
+    current_updated = current.updated_at or current.created_at or datetime.min
+    candidate_updated = candidate.updated_at or candidate.created_at or datetime.min
+    return candidate if candidate_updated >= current_updated else current
+
+
+
+def _build_absence_impact_index(rows: list[AbsenceImpactSummary]) -> AbsenceImpactIndex:
+    by_id: dict[tuple[str, str, str], AbsenceImpactSummary] = {}
+    by_name: dict[tuple[str, str, str], AbsenceImpactSummary] = {}
+
+    for row in rows:
+        team_abbreviation = str(row.team_abbreviation or "").upper()
+        beneficiary_player_id = str(row.beneficiary_player_id or "")
+        source_player_id = str(row.source_player_id or "")
+        if not team_abbreviation or not beneficiary_player_id or not source_player_id:
+            continue
+
+        id_key = (team_abbreviation, beneficiary_player_id, source_player_id)
+        by_id[id_key] = _select_newer_absence_impact_row(by_id.get(id_key), row)
+
+        normalized_source_name = normalize_name(row.source_player_name or "")
+        if normalized_source_name:
+            name_key = (team_abbreviation, beneficiary_player_id, normalized_source_name)
+            by_name[name_key] = _select_newer_absence_impact_row(by_name.get(name_key), row)
+
+    return AbsenceImpactIndex(
+        by_team_beneficiary_source_id=by_id,
+        by_team_beneficiary_source_name=by_name,
+    )
+
+
+
+def _build_absence_impact_context(
+    *,
+    team_rows: list[dict[str, Any]] | None,
+    absence_impact_index: AbsenceImpactIndex | None,
+    team_abbreviation: str | None,
+    player_id: str | None,
+) -> dict[str, Any]:
+    base = {
+        "absence_impact_minutes_delta": None,
+        "absence_impact_usage_delta": None,
+        "absence_impact_touches_delta": None,
+        "absence_impact_passes_delta": None,
+        "absence_impact_sample_confidence": None,
+        "absence_impact_source_count": None,
+    }
+    if not team_rows or absence_impact_index is None or not team_abbreviation or not player_id:
+        return base
+
+    matched_summaries: list[AbsenceImpactSummary] = []
+    seen_source_keys: set[tuple[str, str]] = set()
+    for teammate_row in team_rows:
+        status = str(teammate_row.get("current_status") or "").upper()
+        if status not in {"OUT", "SUSPENDED"}:
+            continue
+        source_player_id = teammate_row.get("player_id")
+        source_player_name = teammate_row.get("player_name")
+        if source_player_id not in (None, "") and str(source_player_id) == str(player_id):
+            continue
+
+        summary = None
+        if source_player_id not in (None, ""):
+            summary = absence_impact_index.by_team_beneficiary_source_id.get(
+                (str(team_abbreviation).upper(), str(player_id), str(source_player_id))
+            )
+        if summary is None:
+            normalized_source_name = normalize_name(source_player_name or "")
+            if normalized_source_name:
+                summary = absence_impact_index.by_team_beneficiary_source_name.get(
+                    (str(team_abbreviation).upper(), str(player_id), normalized_source_name)
+                )
+        if summary is None:
+            continue
+
+        source_key = (str(summary.source_player_id), str(summary.source_player_name or ""))
+        if source_key in seen_source_keys:
+            continue
+        seen_source_keys.add(source_key)
+        matched_summaries.append(summary)
+
+    if not matched_summaries:
+        return base
+
+    matched_summaries.sort(
+        key=lambda row: (
+            float(row.sample_confidence or 0.0),
+            float(row.impact_score or 0.0),
+            row.window_end_date or date.min,
+        ),
+        reverse=True,
+    )
+
+    minutes_delta = 0.0
+    usage_delta = 0.0
+    touches_delta = 0.0
+    passes_delta = 0.0
+    best_confidence = 0.0
+    source_count = 0
+    for summary in matched_summaries[:3]:
+        sample_confidence = float(summary.sample_confidence or 0.0)
+        if sample_confidence < 0.18 or int(summary.source_out_game_count or 0) < 2:
+            continue
+        weight = min(sample_confidence, 1.0)
+        minutes_delta += max(float(summary.minutes_delta or 0.0), 0.0) * weight
+        usage_delta += max(float(summary.usage_delta or 0.0), 0.0) * weight
+        touches_delta += max(float(summary.touches_delta or 0.0), 0.0) * weight
+        passes_delta += max(float(summary.passes_delta or 0.0), 0.0) * weight
+        best_confidence = max(best_confidence, sample_confidence)
+        source_count += 1
+
+    if source_count == 0:
+        return base
+
+    return {
+        "absence_impact_minutes_delta": round(minutes_delta, 4) if minutes_delta > 0.0 else None,
+        "absence_impact_usage_delta": round(usage_delta, 4) if usage_delta > 0.0 else None,
+        "absence_impact_touches_delta": round(touches_delta, 4) if touches_delta > 0.0 else None,
+        "absence_impact_passes_delta": round(passes_delta, 4) if passes_delta > 0.0 else None,
+        "absence_impact_sample_confidence": round(best_confidence, 4) if best_confidence > 0.0 else None,
+        "absence_impact_source_count": float(source_count),
+    }
+
 
 
 def _build_official_injury_aggregates(
@@ -691,6 +998,8 @@ def _build_official_injury_aggregates(
     team_rows: list[dict[str, Any]] | None = None,
     team_role_prior: TeamRolePrior | None = None,
     player_id: str | None = None,
+    team_abbreviation: str | None = None,
+    absence_impact_index: AbsenceImpactIndex | None = None,
     captured_at: datetime,
 ) -> dict[str, Any]:
     base = {
@@ -709,6 +1018,16 @@ def _build_official_injury_aggregates(
         "missing_frontcourt_rotation_piece": None,
         "vacated_minutes_proxy": None,
         "vacated_usage_proxy": None,
+        "role_replacement_minutes_proxy": None,
+        "role_replacement_usage_proxy": None,
+        "role_replacement_touches_proxy": None,
+        "role_replacement_passes_proxy": None,
+        "absence_impact_minutes_delta": None,
+        "absence_impact_usage_delta": None,
+        "absence_impact_touches_delta": None,
+        "absence_impact_passes_delta": None,
+        "absence_impact_sample_confidence": None,
+        "absence_impact_source_count": None,
         "pregame_context_confidence": None,
     }
     if row is None and team_summary is None and not team_rows:
@@ -738,13 +1057,25 @@ def _build_official_injury_aggregates(
         base["official_teammate_questionable_count"] = float(team_summary.get("questionable_count") or 0.0)
 
     role_context = _build_role_based_official_injury_context(team_rows, team_role_prior, player_id=player_id)
+    absence_impact_context = _build_absence_impact_context(
+        team_rows=team_rows,
+        absence_impact_index=absence_impact_index,
+        team_abbreviation=team_abbreviation,
+        player_id=player_id,
+    )
     base.update(role_context)
+    base.update(absence_impact_context)
 
     if row is None:
         base["official_report_datetime_utc"] = report_datetime
         if confidence is None:
             base["pregame_context_confidence"] = 0.25 if team_summary is not None else None
-        elif role_context.get("vacated_minutes_proxy") is not None or role_context.get("missing_primary_ballhandler"):
+        elif (
+            role_context.get("vacated_minutes_proxy") is not None
+            or role_context.get("role_replacement_minutes_proxy") is not None
+            or role_context.get("missing_primary_ballhandler")
+            or role_context.get("missing_frontcourt_rotation_piece")
+        ):
             base["pregame_context_confidence"] = min(float(confidence), 0.65)
         else:
             base["pregame_context_confidence"] = min(float(confidence), 0.25)
@@ -776,6 +1107,43 @@ def _build_official_injury_aggregates(
     return base
 
 
+def _has_official_injury_context(
+    *,
+    official_injury_row: dict[str, Any] | None,
+    official_injury_team_summary: dict[str, Any] | None,
+    official_injury_team_rows: list[dict[str, Any]] | None,
+) -> bool:
+    return official_injury_row is not None or official_injury_team_summary is not None or bool(official_injury_team_rows)
+
+
+def _resolve_context_source(
+    *,
+    pregame_context_row: dict[str, Any] | None,
+    official_injury_attached: bool,
+    official_injury_row: dict[str, Any] | None,
+) -> str:
+    if pregame_context_row is not None:
+        return "pregame_context"
+    if official_injury_row is not None:
+        return "official_injury_player"
+    if official_injury_attached:
+        return "official_injury_team"
+    return "none"
+
+
+def _apply_context_source_confidence_cap(aggregates: dict[str, Any], *, context_source: str) -> dict[str, Any]:
+    confidence = aggregates.get("pregame_context_confidence")
+    if confidence is None:
+        return aggregates
+
+    capped = dict(aggregates)
+    if context_source == "official_injury_player":
+        capped["pregame_context_confidence"] = min(float(confidence), 0.55)
+    elif context_source == "official_injury_team":
+        capped["pregame_context_confidence"] = min(float(confidence), 0.35)
+    return capped
+
+
 def _merge_context_aggregates(primary: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
     merged = dict(fallback)
     merged.update(
@@ -783,6 +1151,7 @@ def _merge_context_aggregates(primary: dict[str, Any], fallback: dict[str, Any])
             key: value
             for key, value in primary.items()
             if key not in {"late_scratch_risk", "pregame_context_confidence", "teammate_out_count_top7", "teammate_out_count_top9"}
+            and value is not None
         }
     )
 
@@ -796,6 +1165,16 @@ def _merge_context_aggregates(primary: dict[str, Any], fallback: dict[str, Any])
         "missing_frontcourt_rotation_piece",
         "vacated_minutes_proxy",
         "vacated_usage_proxy",
+        "role_replacement_minutes_proxy",
+        "role_replacement_usage_proxy",
+        "role_replacement_touches_proxy",
+        "role_replacement_passes_proxy",
+        "absence_impact_minutes_delta",
+        "absence_impact_usage_delta",
+        "absence_impact_touches_delta",
+        "absence_impact_passes_delta",
+        "absence_impact_sample_confidence",
+        "absence_impact_source_count",
         "projected_lineup_confirmed",
         "official_starter_flag",
     ):
@@ -856,6 +1235,16 @@ def _build_pregame_context_aggregates(row: dict[str, Any] | None) -> dict[str, f
             "missing_frontcourt_rotation_piece": None,
             "vacated_minutes_proxy": None,
             "vacated_usage_proxy": None,
+            "role_replacement_minutes_proxy": None,
+            "role_replacement_usage_proxy": None,
+            "role_replacement_touches_proxy": None,
+            "role_replacement_passes_proxy": None,
+            "absence_impact_minutes_delta": None,
+            "absence_impact_usage_delta": None,
+            "absence_impact_touches_delta": None,
+            "absence_impact_passes_delta": None,
+            "absence_impact_sample_confidence": None,
+            "absence_impact_source_count": None,
             "projected_lineup_confirmed": None,
             "official_starter_flag": None,
             "pregame_context_confidence": None,
@@ -874,6 +1263,16 @@ def _build_pregame_context_aggregates(row: dict[str, Any] | None) -> dict[str, f
         "missing_frontcourt_rotation_piece": bool(row.get("missing_frontcourt_rotation_piece")) if row.get("missing_frontcourt_rotation_piece") is not None else None,
         "vacated_minutes_proxy": float(row.get("vacated_minutes_proxy")) if row.get("vacated_minutes_proxy") is not None else None,
         "vacated_usage_proxy": float(row.get("vacated_usage_proxy")) if row.get("vacated_usage_proxy") is not None else None,
+        "role_replacement_minutes_proxy": float(row.get("role_replacement_minutes_proxy")) if row.get("role_replacement_minutes_proxy") is not None else None,
+        "role_replacement_usage_proxy": float(row.get("role_replacement_usage_proxy")) if row.get("role_replacement_usage_proxy") is not None else None,
+        "role_replacement_touches_proxy": float(row.get("role_replacement_touches_proxy")) if row.get("role_replacement_touches_proxy") is not None else None,
+        "role_replacement_passes_proxy": float(row.get("role_replacement_passes_proxy")) if row.get("role_replacement_passes_proxy") is not None else None,
+        "absence_impact_minutes_delta": float(row.get("absence_impact_minutes_delta")) if row.get("absence_impact_minutes_delta") is not None else None,
+        "absence_impact_usage_delta": float(row.get("absence_impact_usage_delta")) if row.get("absence_impact_usage_delta") is not None else None,
+        "absence_impact_touches_delta": float(row.get("absence_impact_touches_delta")) if row.get("absence_impact_touches_delta") is not None else None,
+        "absence_impact_passes_delta": float(row.get("absence_impact_passes_delta")) if row.get("absence_impact_passes_delta") is not None else None,
+        "absence_impact_sample_confidence": float(row.get("absence_impact_sample_confidence")) if row.get("absence_impact_sample_confidence") is not None else None,
+        "absence_impact_source_count": float(row.get("absence_impact_source_count")) if row.get("absence_impact_source_count") is not None else None,
         "projected_lineup_confirmed": bool(row.get("projected_lineup_confirmed")) if row.get("projected_lineup_confirmed") is not None else None,
         "official_starter_flag": bool(row.get("official_starter_flag")) if row.get("official_starter_flag") is not None else None,
         "pregame_context_confidence": float(row.get("pregame_context_confidence")) if row.get("pregame_context_confidence") is not None else None,
@@ -960,6 +1359,7 @@ def build_pregame_feature_seed(
     league_avg_opponent_points_by_season: dict[str, float | None] | None = None,
     pregame_context_index: PregameContextIndex | None = None,
     official_injury_index: OfficialInjuryReportIndex | None = None,
+    absence_impact_index: AbsenceImpactIndex | None = None,
     team_role_prior_cache: dict[tuple[str, str], TeamRolePrior | None] | None = None,
     logs_by_player: dict[str, list[HistoricalGameLog]] | None = None,
     advanced_by_player_game: dict[tuple[str, str], HistoricalAdvancedLog] | None = None,
@@ -1085,6 +1485,7 @@ def build_pregame_feature_seed(
         official_injury_row=official_injury_row,
         official_injury_team_summary=official_injury_team_summary,
         official_injury_team_rows=official_injury_team_rows,
+        absence_impact_index=absence_impact_index,
         team_role_prior=team_role_prior,
     )
 
@@ -1157,6 +1558,7 @@ def load_pregame_feature_seeds(
                 captured_at=latest_captured_at,
             )
         )
+        absence_impact_index = _build_absence_impact_index(session.query(AbsenceImpactSummary).all())
         team_role_prior_cache: dict[tuple[str, str], TeamRolePrior | None] = {}
 
         seeds: list[PregameFeatureSeed] = []
@@ -1183,6 +1585,7 @@ def load_pregame_feature_seeds(
                 league_avg_opponent_points_by_season=league_avg_opponent_points_by_season,
                 pregame_context_index=pregame_context_index,
                 official_injury_index=official_injury_index,
+                absence_impact_index=absence_impact_index,
                 team_role_prior_cache=team_role_prior_cache,
             )
             if seed is not None:

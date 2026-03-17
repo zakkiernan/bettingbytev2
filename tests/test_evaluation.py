@@ -7,9 +7,14 @@ from types import SimpleNamespace
 from analytics.evaluation import (
     _build_historical_injury_report_indexes,
     _build_odds_index,
+    _grade_recommended_pick,
     _select_historical_injury_index,
     _select_latest_pregame_odds_snapshot,
+    _summarize_context_attachment,
+    _summarize_points_decisions,
     _summarize_points_errors,
+    summarize_opportunity_absence_impact,
+    summarize_points_absence_impact,
 )
 from analytics.injury_report_loader import get_official_team_summary, match_official_injury_row
 
@@ -156,6 +161,167 @@ class HistoricalOddsEvaluationTests(unittest.TestCase):
         self.assertEqual(populated.bias, 0.5)
         self.assertEqual(populated.within_two_points_pct, 1.0)
         self.assertEqual(populated.within_four_points_pct, 1.0)
+
+    def test_summarize_context_attachment_tracks_injury_only_rows(self):
+        coverage = _summarize_context_attachment([
+            SimpleNamespace(pregame_context_attached=True, official_injury_attached=True),
+            SimpleNamespace(pregame_context_attached=False, official_injury_attached=True),
+            SimpleNamespace(pregame_context_attached=False, official_injury_attached=False),
+        ])
+
+        self.assertEqual(coverage.pregame_context_attached_count, 1)
+        self.assertEqual(coverage.official_injury_attached_count, 2)
+        self.assertEqual(coverage.injury_only_context_count, 1)
+
+    def test_grade_recommended_pick_handles_win_loss_push(self):
+        win = SimpleNamespace(line_available=True, recommended_side='OVER', line=24.5, actual_points=28.0)
+        loss = SimpleNamespace(line_available=True, recommended_side='UNDER', line=24.5, actual_points=27.0)
+        push = SimpleNamespace(line_available=True, recommended_side='OVER', line=24.0, actual_points=24.0)
+        missing = SimpleNamespace(line_available=False, recommended_side='OVER', line=None, actual_points=24.0)
+
+        self.assertEqual(_grade_recommended_pick(win), 'win')
+        self.assertEqual(_grade_recommended_pick(loss), 'loss')
+        self.assertEqual(_grade_recommended_pick(push), 'push')
+        self.assertIsNone(_grade_recommended_pick(missing))
+
+    def test_summarize_points_decisions_buckets_recommendations(self):
+        rows = [
+            SimpleNamespace(line_available=True, recommended_side='OVER', recommended_outcome='win', edge_over=1.4, confidence=0.61),
+            SimpleNamespace(line_available=True, recommended_side='UNDER', recommended_outcome='loss', edge_over=-2.2, confidence=0.73),
+            SimpleNamespace(line_available=True, recommended_side='OVER', recommended_outcome='push', edge_over=3.3, confidence=0.82),
+            SimpleNamespace(line_available=False, recommended_side='OVER', recommended_outcome=None, edge_over=4.0, confidence=0.90),
+            SimpleNamespace(line_available=True, recommended_side=None, recommended_outcome=None, edge_over=0.8, confidence=0.55),
+        ]
+
+        summary = _summarize_points_decisions(rows)
+
+        self.assertEqual(summary.recommendation_count, 3)
+        self.assertEqual(summary.win_count, 1)
+        self.assertEqual(summary.loss_count, 1)
+        self.assertEqual(summary.push_count, 1)
+        self.assertEqual(summary.graded_count, 2)
+        self.assertEqual(summary.over_recommendation_count, 2)
+        self.assertEqual(summary.under_recommendation_count, 1)
+        self.assertAlmostEqual(summary.hit_rate, 0.5)
+        self.assertTrue(any(bucket.label == '60-70%' for bucket in summary.confidence_buckets))
+        self.assertTrue(any(bucket.label == '1.0-2.0' for bucket in summary.edge_buckets))
+
+    def test_summarize_points_absence_impact_splits_usage_only_vs_minutes(self):
+        summary = summarize_points_absence_impact([
+            SimpleNamespace(
+                game_id='1',
+                game_date=datetime(2026, 1, 1),
+                player_name='A',
+                team_abbreviation='BOS',
+                opponent_abbreviation='NYK',
+                projected_points=22.0,
+                actual_points=18.0,
+                error=4.0,
+                abs_error=4.0,
+                absence_impact_sample_confidence=0.42,
+                absence_impact_source_count=1.0,
+                absence_impact_minutes_bonus=0.0,
+                absence_impact_usage_bonus=0.01,
+            ),
+            SimpleNamespace(
+                game_id='2',
+                game_date=datetime(2026, 1, 2),
+                player_name='B',
+                team_abbreviation='BOS',
+                opponent_abbreviation='MIA',
+                projected_points=24.0,
+                actual_points=15.0,
+                error=9.0,
+                abs_error=9.0,
+                absence_impact_sample_confidence=0.68,
+                absence_impact_source_count=2.0,
+                absence_impact_minutes_bonus=1.2,
+                absence_impact_usage_bonus=0.012,
+            ),
+            SimpleNamespace(
+                game_id='3',
+                game_date=datetime(2026, 1, 3),
+                player_name='C',
+                team_abbreviation='BOS',
+                opponent_abbreviation='PHI',
+                projected_points=20.0,
+                actual_points=19.0,
+                error=1.0,
+                abs_error=1.0,
+                absence_impact_sample_confidence=None,
+                absence_impact_source_count=None,
+                absence_impact_minutes_bonus=0.0,
+                absence_impact_usage_bonus=0.0,
+            ),
+        ])
+
+        self.assertEqual(summary['affected_count'], 2)
+        self.assertEqual(summary['minutes_affected_count'], 1)
+        self.assertEqual(summary['usage_only_count'], 1)
+        self.assertEqual(summary['usage_only_mae'], 4.0)
+        self.assertEqual(summary['minutes_affected_mae'], 9.0)
+        self.assertEqual(summary['unaffected_mae'], 1.0)
+        self.assertTrue(any(bucket.label == '0.35-0.49' for bucket in summary['confidence_buckets']))
+
+    def test_summarize_opportunity_absence_impact_splits_usage_only_vs_minutes(self):
+        summary = summarize_opportunity_absence_impact([
+            SimpleNamespace(
+                game_id='1',
+                game_date=datetime(2026, 1, 1),
+                player_name='A',
+                team_abbreviation='BOS',
+                opponent_abbreviation='NYK',
+                expected_minutes=28.0,
+                actual_minutes=24.0,
+                minutes_error=4.0,
+                abs_minutes_error=4.0,
+                context_source='pregame_context',
+                absence_impact_sample_confidence=0.42,
+                absence_impact_source_count=1.0,
+                absence_impact_minutes_bonus=0.0,
+                absence_impact_usage_bonus=0.01,
+            ),
+            SimpleNamespace(
+                game_id='2',
+                game_date=datetime(2026, 1, 2),
+                player_name='B',
+                team_abbreviation='BOS',
+                opponent_abbreviation='MIA',
+                expected_minutes=34.0,
+                actual_minutes=20.0,
+                minutes_error=14.0,
+                abs_minutes_error=14.0,
+                context_source='pregame_context',
+                absence_impact_sample_confidence=0.68,
+                absence_impact_source_count=2.0,
+                absence_impact_minutes_bonus=1.2,
+                absence_impact_usage_bonus=0.012,
+            ),
+            SimpleNamespace(
+                game_id='3',
+                game_date=datetime(2026, 1, 3),
+                player_name='C',
+                team_abbreviation='BOS',
+                opponent_abbreviation='PHI',
+                expected_minutes=22.0,
+                actual_minutes=21.0,
+                minutes_error=1.0,
+                abs_minutes_error=1.0,
+                context_source='none',
+                absence_impact_sample_confidence=None,
+                absence_impact_source_count=None,
+                absence_impact_minutes_bonus=0.0,
+                absence_impact_usage_bonus=0.0,
+            ),
+        ])
+
+        self.assertEqual(summary['affected_count'], 2)
+        self.assertEqual(summary['minutes_affected_count'], 1)
+        self.assertEqual(summary['usage_only_count'], 1)
+        self.assertEqual(summary['usage_only_minutes_mae'], 4.0)
+        self.assertEqual(summary['minutes_affected_minutes_mae'], 14.0)
+        self.assertEqual(summary['unaffected_minutes_mae'], 1.0)
+        self.assertTrue(any(bucket.label == '0.65+' for bucket in summary['confidence_buckets']))
 
 
 if __name__ == '__main__':

@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import traceback
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any, Callable
 
+import requests
+
+from api.services.stats_signal_service import persist_current_signal_snapshots
 from database.db import init_db
 from ingestion.fanduel_client import fetch_current_prop_board
-from ingestion.injury_reports import backfill_official_injury_reports as backfill_official_injury_reports_impl, sync_official_injury_report as sync_official_injury_report_impl
+from ingestion.injury_reports import (
+    backfill_official_injury_reports as backfill_official_injury_reports_impl,
+    build_injury_report_url,
+    sync_official_injury_report as sync_official_injury_report_impl,
+)
 from ingestion.pregame_context import build_pregame_context_source_payloads, sync_pregame_context as sync_current_pregame_context
 from ingestion.nba_client import (
     DEFAULT_SEASON,
@@ -223,6 +230,16 @@ def _sync_pregame_markets_impl(run_id: int | None = None) -> dict[str, int]:
     pregame_context_result = sync_current_pregame_context(captured_at=board.get("captured_at"), stat_type="points")
     pregame_context_payloads = build_pregame_context_source_payloads(pregame_context_result)
     write_source_payloads(pregame_context_payloads)
+    signal_snapshot_metrics = persist_current_signal_snapshots()
+    if run_id is not None:
+        create_ingestion_run_item(
+            run_id=run_id,
+            entity_type="signal_phase",
+            entity_key="current",
+            stage="stats_signal_snapshot",
+            status="success",
+            metrics=signal_snapshot_metrics,
+        )
 
     return {
         "props": len(props),
@@ -237,6 +254,7 @@ def _sync_pregame_markets_impl(run_id: int | None = None) -> dict[str, int]:
         "pregame_context_missing_game_count": len(pregame_context_result.attachment_metrics.get("missing_context_game_ids", [])),
         "pregame_context_projected_unavailable_count": int(pregame_context_result.attachment_metrics.get("projected_unavailable_count", 0)),
         "pregame_context_high_late_scratch_risk_count": int(pregame_context_result.attachment_metrics.get("high_late_scratch_risk_count", 0)),
+        **signal_snapshot_metrics,
     }
 
 
@@ -349,6 +367,14 @@ def _sync_rotation_for_game(game_id: str, run_id: int | None = None) -> dict[str
     write_player_rotation_games(result.player_rotation_games)
     write_player_rotation_stints(result.rotations)
 
+    success_metrics = {
+        "rotation_stints": len(result.rotations),
+        "team_rotation_games": len(result.team_rotation_games),
+        "player_rotation_games": len(result.player_rotation_games),
+        "raw_payloads": len(result.payloads),
+        **dict(result.coverage_metrics),
+    }
+
     if run_id is not None:
         create_ingestion_run_item(
             run_id=run_id,
@@ -356,12 +382,7 @@ def _sync_rotation_for_game(game_id: str, run_id: int | None = None) -> dict[str
             entity_key=game_id,
             stage="game_rotation",
             status="success",
-            metrics={
-                "rotation_stints": len(result.rotations),
-                "team_rotation_games": len(result.team_rotation_games),
-                "player_rotation_games": len(result.player_rotation_games),
-                "raw_payloads": len(result.payloads),
-            },
+            metrics=success_metrics,
         )
 
     return {
@@ -369,6 +390,7 @@ def _sync_rotation_for_game(game_id: str, run_id: int | None = None) -> dict[str
         "team_rotation_games": len(result.team_rotation_games),
         "player_rotation_games": len(result.player_rotation_games),
         "raw_payloads": len(result.payloads),
+        "coverage_metrics": dict(result.coverage_metrics),
         "error_type": None,
         "error_text": None,
         "error_details": {},
@@ -382,6 +404,7 @@ def _process_rotation_sync_queue_impl(
     max_batches: int | None = None,
     specific_game_ids: list[str] | None = None,
     force_retry: bool = False,
+    include_partial_success: bool = False,
     run_id: int | None = None,
 ) -> dict[str, Any]:
     seed_metrics = seed_rotation_sync_states(season=season, specific_game_ids=specific_game_ids)
@@ -401,9 +424,11 @@ def _process_rotation_sync_queue_impl(
             "remaining_backlog": 0,
             "pending_games_selected": 0,
             "retry_games_selected": 0,
+            "partial_success_games_selected": 0,
             "skipped_cooldown_games": 0,
             "quarantined_games": 0,
             "force_retry": force_retry,
+            "include_partial_success": include_partial_success,
             **seed_metrics,
         }
 
@@ -416,10 +441,12 @@ def _process_rotation_sync_queue_impl(
     payload_count = 0
     pending_games_selected = 0
     retry_games_selected = 0
+    partial_success_games_selected = 0
     skipped_cooldown_games = 0
     quarantined_games = 0
     batch_counter = 0
     remaining_specific_game_ids = [str(game_id) for game_id in specific_game_ids] if specific_game_ids is not None else None
+    processed_game_ids: set[str] = set()
 
     while True:
         if max_batches is not None and batch_counter >= max_batches:
@@ -430,6 +457,8 @@ def _process_rotation_sync_queue_impl(
             batch_size=batch_size,
             specific_game_ids=remaining_specific_game_ids,
             force_retry=force_retry,
+            include_partial_success=include_partial_success,
+            exclude_game_ids=sorted(processed_game_ids) if processed_game_ids else None,
         )
         selected_game_ids = selection["selected_game_ids"]
         if not selected_game_ids:
@@ -440,10 +469,12 @@ def _process_rotation_sync_queue_impl(
         batch_counter += 1
         pending_games_selected += int(selection.get("pending_games_selected", 0))
         retry_games_selected += int(selection.get("retry_games_selected", 0))
+        partial_success_games_selected += int(selection.get("partial_success_games_selected", 0))
         skipped_cooldown_games += int(selection.get("skipped_cooldown_games", 0))
         quarantined_games += int(selection.get("quarantined_games", 0))
 
         for game_id in selected_game_ids:
+            processed_game_ids.add(str(game_id))
             metrics = _sync_rotation_for_game(game_id, run_id=run_id)
             processed_games += 1
             payload_count += int(metrics.get("raw_payloads", 0))
@@ -489,9 +520,11 @@ def _process_rotation_sync_queue_impl(
         "remaining_backlog": len(remaining_backlog_rows),
         "pending_games_selected": pending_games_selected,
         "retry_games_selected": retry_games_selected,
+        "partial_success_games_selected": partial_success_games_selected,
         "skipped_cooldown_games": skipped_cooldown_games,
         "quarantined_games": quarantined_games,
         "force_retry": force_retry,
+        "include_partial_success": include_partial_success,
         **seed_metrics,
     }
 
@@ -530,6 +563,7 @@ def backfill_historical_rotations(
         max_batches,
         specific_game_ids,
         False,
+        True,
     )
 
 
@@ -764,6 +798,42 @@ def _sync_official_injury_report_impl(url: str, run_id: int | None = None) -> di
 
 def sync_official_injury_report(url: str) -> dict[str, Any]:
     return _run_logged_job("sync_official_injury_report", _sync_official_injury_report_impl, url)
+
+
+def _sync_scheduled_official_injury_report_impl(
+    report_date: date,
+    report_time_et: time,
+    run_id: int | None = None,
+) -> dict[str, Any]:
+    url = build_injury_report_url(report_date, report_time_et)
+    try:
+        result = sync_official_injury_report_impl(url)
+    except requests.HTTPError as exc:
+        status_code = getattr(exc.response, "status_code", None)
+        if status_code in {403, 404}:
+            return {
+                "status": "not_available",
+                "url": url,
+                "entries": 0,
+                "report_date": report_date.isoformat(),
+                "report_time_et": report_time_et.strftime("%H:%M"),
+            }
+        raise
+
+    return {
+        **result,
+        "report_date": report_date.isoformat(),
+        "report_time_et": report_time_et.strftime("%H:%M"),
+    }
+
+
+def sync_scheduled_official_injury_report(report_date: date, report_time_et: time) -> dict[str, Any]:
+    return _run_logged_job(
+        "sync_scheduled_official_injury_report",
+        _sync_scheduled_official_injury_report_impl,
+        report_date,
+        report_time_et,
+    )
 
 
 def _backfill_official_injury_reports_impl(

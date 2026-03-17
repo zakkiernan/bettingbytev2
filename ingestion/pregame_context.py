@@ -36,6 +36,16 @@ class PregameContextSyncResult:
     captured_at: datetime | None
 
 
+@dataclass(slots=True)
+class _AttachmentMarket:
+    game_id: str
+    player_id: str
+    player_name: str
+    team: str | None
+    opponent: str | None
+    captured_at: datetime
+
+
 def sync_pregame_context(
     *,
     base_dir: str | Path | None = None,
@@ -70,14 +80,16 @@ def sync_pregame_context(
 
     feature_rows = build_pregame_feature_rows(payload, priors_by_team_id=priors)
     feature_rows = _decorate_feature_rows(feature_rows, payload=payload, captured_at=resolved_captured_at)
-    feature_rows_path = save_feature_rows(feature_rows, resolved_base_dir / "features" / "latest.json")
-    history_feature_rows_path = _save_feature_rows_history(feature_rows, resolved_base_dir / "features" / "history", resolved_captured_at)
+    serializable_feature_rows = _serialize_feature_rows(feature_rows)
+    feature_rows_path = save_feature_rows(serializable_feature_rows, resolved_base_dir / "features" / "latest.json")
+    history_feature_rows_path = _save_feature_rows_history(serializable_feature_rows, resolved_base_dir / "features" / "history", resolved_captured_at)
     write_pregame_context_snapshots(feature_rows, captured_at=resolved_captured_at)
 
     attachment_metrics = summarize_pregame_context_attachment(
         feature_rows=feature_rows,
         captured_at=resolved_captured_at,
         stat_type=stat_type,
+        payload=payload,
     )
     return PregameContextSyncResult(
         payload=payload,
@@ -96,7 +108,15 @@ def summarize_pregame_context_attachment(
     feature_rows: list[dict[str, Any]] | None = None,
     captured_at: datetime | None = None,
     stat_type: str = "points",
+    payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if payload is None:
+        payload = _load_payload(DEFAULT_BASE_DIR / "latest.json")
+
+    payload_metrics = _summarize_payload_source_coverage(payload)
+    empty_source_game_ids = set(payload_metrics["empty_source_game_ids"])
+    partial_source_game_ids = set(payload_metrics["partial_source_game_ids"])
+
     with session_scope() as session:
         latest_captured_at = captured_at
         if latest_captured_at is None:
@@ -108,22 +128,18 @@ def summarize_pregame_context_attachment(
                 .scalar()
             )
         if latest_captured_at is None:
-            return {
-                "captured_at": None,
-                "market_count": 0,
-                "attached_count": 0,
-                "attached_pct": 0.0,
-                "market_game_ids": [],
-                "context_game_ids": [],
-                "overlap_game_ids": [],
-                "missing_context_game_ids": [],
-                "expected_start_count": 0,
-                "projected_unavailable_count": 0,
-                "high_late_scratch_risk_count": 0,
-            }
+            return _empty_attachment_metrics(payload_metrics)
 
-        markets = (
-            session.query(PlayerPropSnapshot, Game)
+        market_rows = (
+            session.query(
+                PlayerPropSnapshot.game_id,
+                PlayerPropSnapshot.player_id,
+                PlayerPropSnapshot.player_name,
+                PlayerPropSnapshot.team,
+                PlayerPropSnapshot.opponent,
+                PlayerPropSnapshot.captured_at,
+                Game,
+            )
             .outerjoin(Game, Game.game_id == PlayerPropSnapshot.game_id)
             .filter(
                 PlayerPropSnapshot.stat_type == stat_type,
@@ -132,6 +148,20 @@ def summarize_pregame_context_attachment(
             )
             .all()
         )
+        markets = [
+            (
+                _AttachmentMarket(
+                    game_id=str(game_id),
+                    player_id=str(player_id),
+                    player_name=str(player_name),
+                    team=team,
+                    opponent=opponent,
+                    captured_at=row_captured_at,
+                ),
+                game,
+            )
+            for game_id, player_id, player_name, team, opponent, row_captured_at, game in market_rows
+        ]
         market_game_ids = sorted({market.game_id for market, _ in markets if market.game_id})
 
         rows = feature_rows
@@ -143,14 +173,28 @@ def summarize_pregame_context_attachment(
         index = build_pregame_context_index(rows)
         context_game_ids = sorted({str(row.get("game_id") or "") for row in rows if row.get("game_id")})
         overlap_game_ids = sorted(set(market_game_ids) & set(context_game_ids))
+        overlap_game_id_set = set(overlap_game_ids)
 
         attached_count = 0
+        overlap_market_count = 0
+        overlap_attached_count = 0
+        empty_source_market_count = 0
+        partial_source_market_count = 0
         expected_start_count = 0
         projected_unavailable_count = 0
         high_late_scratch_risk_count = 0
         coverage_examples: list[dict[str, Any]] = []
+        missing_overlap_examples: list[dict[str, Any]] = []
 
         for market, game in markets:
+            game_id = str(market.game_id)
+            if game_id in overlap_game_id_set:
+                overlap_market_count += 1
+            if game_id in empty_source_game_ids:
+                empty_source_market_count += 1
+            if game_id in partial_source_game_ids:
+                partial_source_market_count += 1
+
             team_abbr = _resolve_market_team_abbreviation(session, market, game)
             row = match_pregame_context_row(
                 index,
@@ -161,8 +205,19 @@ def summarize_pregame_context_attachment(
                 captured_at=latest_captured_at,
             )
             if row is None:
+                if game_id in overlap_game_id_set and len(missing_overlap_examples) < 10:
+                    missing_overlap_examples.append(
+                        {
+                            "game_id": game_id,
+                            "player_name": market.player_name,
+                            "team": team_abbr,
+                        }
+                    )
                 continue
+
             attached_count += 1
+            if game_id in overlap_game_id_set:
+                overlap_attached_count += 1
             if row.get("expected_start") is True:
                 expected_start_count += 1
             if row.get("projected_available") is False or row.get("official_available") is False:
@@ -183,6 +238,7 @@ def summarize_pregame_context_attachment(
                 )
 
     market_count = len(markets)
+    missing_context_game_ids = sorted(set(market_game_ids) - set(context_game_ids))
     return {
         "captured_at": latest_captured_at.isoformat() if latest_captured_at is not None else None,
         "market_count": market_count,
@@ -192,12 +248,89 @@ def summarize_pregame_context_attachment(
         "context_game_ids": context_game_ids,
         "overlap_game_ids": overlap_game_ids,
         "overlap_game_count": len(overlap_game_ids),
-        "missing_context_game_ids": sorted(set(market_game_ids) - set(context_game_ids)),
+        "overlap_market_count": overlap_market_count,
+        "overlap_attached_count": overlap_attached_count,
+        "overlap_attached_pct": round(overlap_attached_count / overlap_market_count, 4) if overlap_market_count else 0.0,
+        "missing_overlap_market_count": max(overlap_market_count - overlap_attached_count, 0),
+        "missing_overlap_examples": missing_overlap_examples,
+        "missing_context_game_ids": missing_context_game_ids,
         "expected_start_count": expected_start_count,
         "projected_unavailable_count": projected_unavailable_count,
         "high_late_scratch_risk_count": high_late_scratch_risk_count,
+        "empty_source_market_count": empty_source_market_count,
+        "partial_source_market_count": partial_source_market_count,
         "examples": coverage_examples,
+        **payload_metrics,
     }
+
+
+def _empty_attachment_metrics(payload_metrics: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "captured_at": None,
+        "market_count": 0,
+        "attached_count": 0,
+        "attached_pct": 0.0,
+        "market_game_ids": [],
+        "context_game_ids": [],
+        "overlap_game_ids": [],
+        "overlap_game_count": 0,
+        "overlap_market_count": 0,
+        "overlap_attached_count": 0,
+        "overlap_attached_pct": 0.0,
+        "missing_overlap_market_count": 0,
+        "missing_overlap_examples": [],
+        "missing_context_game_ids": [],
+        "expected_start_count": 0,
+        "projected_unavailable_count": 0,
+        "high_late_scratch_risk_count": 0,
+        "empty_source_market_count": 0,
+        "partial_source_market_count": 0,
+        "examples": [],
+        **payload_metrics,
+    }
+
+
+def _summarize_payload_source_coverage(payload: dict[str, Any] | None) -> dict[str, Any]:
+    base = {
+        "payload_game_ids": [],
+        "payload_game_count": 0,
+        "empty_source_game_ids": [],
+        "empty_source_game_count": 0,
+        "partial_source_game_ids": [],
+        "partial_source_game_count": 0,
+    }
+    if not payload:
+        return base
+
+    payload_games = [game for game in payload.get("games", []) if isinstance(game, dict)]
+    payload_game_ids = sorted({str(game.get("game_id") or "") for game in payload_games if game.get("game_id")})
+    empty_source_game_ids: list[str] = []
+    partial_source_game_ids: list[str] = []
+
+    for game in payload_games:
+        game_id = str(game.get("game_id") or "")
+        if not game_id:
+            continue
+        has_player_level_rows = bool(game.get("availability") or game.get("projected_starters") or game.get("projected_absences"))
+        sources = game.get("sources_present") or {}
+        has_nba = bool(sources.get("nba_live_boxscore"))
+        has_rw = bool(sources.get("rotowire_lineups"))
+        if not has_player_level_rows:
+            empty_source_game_ids.append(game_id)
+        elif not (has_nba and has_rw):
+            partial_source_game_ids.append(game_id)
+
+    base.update(
+        {
+            "payload_game_ids": payload_game_ids,
+            "payload_game_count": len(payload_game_ids),
+            "empty_source_game_ids": sorted(set(empty_source_game_ids)),
+            "empty_source_game_count": len(set(empty_source_game_ids)),
+            "partial_source_game_ids": sorted(set(partial_source_game_ids)),
+            "partial_source_game_count": len(set(partial_source_game_ids)),
+        }
+    )
+    return base
 
 
 def build_pregame_context_source_payloads(result: PregameContextSyncResult) -> list[dict[str, Any]]:
@@ -227,6 +360,53 @@ def build_pregame_context_source_payloads(result: PregameContextSyncResult) -> l
             "captured_at": captured_at,
         },
     ]
+
+
+def backfill_pregame_context_snapshots_from_files(
+    *,
+    latest_path: str | Path | None = None,
+    history_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    resolved_latest_path = Path(latest_path) if latest_path is not None else DEFAULT_FEATURES_PATH
+    resolved_history_dir = Path(history_dir) if history_dir is not None else resolved_latest_path.parent / "history"
+
+    candidate_paths: list[Path] = []
+    if resolved_history_dir.exists():
+        candidate_paths.extend(sorted(path for path in resolved_history_dir.glob('*.json') if path.is_file()))
+    if resolved_latest_path.exists():
+        candidate_paths.append(resolved_latest_path)
+
+    imported_files = 0
+    imported_rows = 0
+    captures: list[str] = []
+    seen_paths: set[Path] = set()
+
+    for path in candidate_paths:
+        if path in seen_paths:
+            continue
+        seen_paths.add(path)
+
+        rows = _load_feature_rows(path)
+        if not rows:
+            continue
+
+        captured_at = _captured_at_from_feature_rows(rows, fallback_path=path)
+        prepared_rows = _prepare_feature_rows_for_storage(rows, captured_at=captured_at)
+        if not prepared_rows:
+            continue
+
+        write_pregame_context_snapshots(prepared_rows, captured_at=captured_at)
+        imported_files += 1
+        imported_rows += len(prepared_rows)
+        captures.append(captured_at.isoformat())
+
+    return {
+        "file_count": imported_files,
+        "row_count": imported_rows,
+        "captures": captures,
+        "latest_path": str(resolved_latest_path),
+        "history_dir": str(resolved_history_dir),
+    }
 
 
 def _decorate_feature_rows(
@@ -309,7 +489,79 @@ def _load_feature_rows(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     payload = json.loads(path.read_text(encoding="utf-8"))
-    return [row for row in payload if isinstance(row, dict)] if isinstance(payload, list) else []
+    return [row for row in payload if isinstance(payload, list) and isinstance(row, dict)] if isinstance(payload, list) else []
+
+
+def _serialize_feature_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    serialized: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        serialized.append(
+            {
+                key: value.isoformat() if isinstance(value, datetime) else value
+                for key, value in row.items()
+            }
+        )
+    return serialized
+
+
+def _prepare_feature_rows_for_storage(rows: list[dict[str, Any]], *, captured_at: datetime) -> list[dict[str, Any]]:
+    prepared: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        player_name = row.get("player_name") or ""
+        row_captured_at = _parse_datetime_value(row.get("captured_at")) or captured_at
+        source_captured_at = (
+            _parse_datetime_value(row.get("source_captured_at"))
+            or _parse_datetime_value(row.get("asof_utc"))
+            or row_captured_at
+        )
+        prepared.append(
+            {
+                **row,
+                "team_abbreviation": row.get("team_abbreviation") or row.get("team_abbr"),
+                "normalized_player_name": row.get("normalized_player_name") or (normalize_name(player_name) if player_name else None),
+                "source_captured_at": source_captured_at,
+                "captured_at": row_captured_at,
+            }
+        )
+    return prepared
+
+
+def _captured_at_from_feature_rows(rows: list[dict[str, Any]], *, fallback_path: Path | None = None) -> datetime:
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for key in ("captured_at", "source_captured_at", "asof_utc"):
+            parsed = _parse_datetime_value(row.get(key))
+            if parsed is not None:
+                return parsed
+    if fallback_path is not None:
+        try:
+            return datetime.strptime(fallback_path.stem, "%Y%m%d_%H%M%S")
+        except ValueError:
+            pass
+    return datetime.utcnow()
+
+
+def _parse_datetime_value(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return datetime.fromisoformat(value.replace('Z', '+00:00'))
+        except ValueError:
+            return None
+    return None
+
+
+def _load_payload(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return payload if isinstance(payload, dict) else None
 
 
 def _load_target_games(*, captured_at: datetime | None, stat_type: str) -> tuple[list[dict[str, Any]], datetime | None]:

@@ -508,12 +508,99 @@ class PregameContextSnapshot(Base):
     missing_frontcourt_rotation_piece: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     vacated_minutes_proxy: Mapped[float | None] = mapped_column(Float, nullable=True)
     vacated_usage_proxy: Mapped[float | None] = mapped_column(Float, nullable=True)
+    role_replacement_minutes_proxy: Mapped[float | None] = mapped_column(Float, nullable=True)
+    role_replacement_usage_proxy: Mapped[float | None] = mapped_column(Float, nullable=True)
+    role_replacement_touches_proxy: Mapped[float | None] = mapped_column(Float, nullable=True)
+    role_replacement_passes_proxy: Mapped[float | None] = mapped_column(Float, nullable=True)
     projected_lineup_confirmed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     official_starter_flag: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     pregame_context_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     source_captured_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     captured_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class AbsenceImpactSummary(Base):
+    __tablename__ = "absence_impact_summaries"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_player_id",
+            "beneficiary_player_id",
+            "team_abbreviation",
+            "window_start_date",
+            "window_end_date",
+            name="uq_absence_impact_summary_window",
+        ),
+        Index(
+            "ix_absence_impact_source_lookup",
+            "source_player_id",
+            "team_abbreviation",
+            "window_end_date",
+        ),
+        Index(
+            "ix_absence_impact_beneficiary_lookup",
+            "beneficiary_player_id",
+            "team_abbreviation",
+            "window_end_date",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_player_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    source_player_name: Mapped[str] = mapped_column(String, nullable=False)
+    beneficiary_player_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    beneficiary_player_name: Mapped[str] = mapped_column(String, nullable=False)
+    team_abbreviation: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    window_start_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    window_end_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    source_out_game_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    source_active_game_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    beneficiary_out_game_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    beneficiary_active_game_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    minutes_delta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    points_delta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rebounds_delta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    assists_delta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    blocks_delta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    usage_delta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    touches_delta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    passes_delta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    impact_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sample_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    build_version: Mapped[str] = mapped_column(String, nullable=False, default="absence-impact-v1")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+
+class AbsenceSourceOverride(Base):
+    __tablename__ = "absence_source_overrides"
+    __table_args__ = (
+        Index("ix_absence_source_override_team_date", "team_abbreviation", "start_date", "end_date"),
+        Index("ix_absence_source_override_team_player_id", "team_abbreviation", "player_id"),
+        Index("ix_absence_source_override_team_normalized_name", "team_abbreviation", "normalized_player_name"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    team_abbreviation: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    player_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    player_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    normalized_player_name: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    include_as_source: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    start_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    end_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
 
 
 class IngestionRun(Base):
@@ -606,6 +693,48 @@ class ModelSignal(Base):
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     recommended_side: Mapped[str | None] = mapped_column(String, nullable=True)
     metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
+class StatsSignalSnapshot(Base):
+    __tablename__ = "stats_signal_snapshots"
+    __table_args__ = (
+        Index("ix_stats_signal_snapshot_player_created", "player_id", "created_at"),
+        Index("ix_stats_signal_snapshot_game_created", "game_id", "created_at"),
+        Index("ix_stats_signal_snapshot_status_created", "readiness_status", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    game_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    player_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    player_name: Mapped[str] = mapped_column(String, nullable=False)
+    team_abbreviation: Mapped[str | None] = mapped_column(String, nullable=True)
+    opponent_abbreviation: Mapped[str | None] = mapped_column(String, nullable=True)
+    stat_type: Mapped[str] = mapped_column(String, nullable=False)
+    snapshot_phase: Mapped[str] = mapped_column(String, nullable=False, default="current")
+    line: Mapped[float] = mapped_column(Float, nullable=False)
+    over_odds: Mapped[int] = mapped_column(Integer, nullable=False)
+    under_odds: Mapped[int] = mapped_column(Integer, nullable=False)
+    projected_value: Mapped[float] = mapped_column(Float, nullable=False)
+    edge_over: Mapped[float | None] = mapped_column(Float, nullable=True)
+    edge_under: Mapped[float | None] = mapped_column(Float, nullable=True)
+    over_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    under_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    recommended_side: Mapped[str | None] = mapped_column(String, nullable=True)
+    recent_hit_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    recent_games_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    key_factor: Mapped[str | None] = mapped_column(String, nullable=True)
+    is_ready: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    readiness_status: Mapped[str] = mapped_column(String, nullable=False, default="ready")
+    using_fallback: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    readiness_json: Mapped[str] = mapped_column(Text, nullable=False)
+    breakdown_json: Mapped[str] = mapped_column(Text, nullable=False)
+    opportunity_json: Mapped[str] = mapped_column(Text, nullable=False)
+    features_json: Mapped[str] = mapped_column(Text, nullable=False)
+    source_prop_captured_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    source_context_captured_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    source_injury_report_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
 

@@ -1,40 +1,23 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
 
-from fastapi import APIRouter
-
-from api.schemas import GameDetailResponse, GameResponse, TeamBrief
+from api.schemas.games import GameDetailResponse, GameResponse
+from api.services import game_service
+from database.db import get_db
 
 router = APIRouter(prefix="/games", tags=["games"])
 
 
-LAKERS = TeamBrief(team_id="1610612747", abbreviation="LAL", full_name="Los Angeles Lakers", city="Los Angeles", nickname="Lakers")
-MAVERICKS = TeamBrief(team_id="1610612742", abbreviation="DAL", full_name="Dallas Mavericks", city="Dallas", nickname="Mavericks")
-
-GAME = GameDetailResponse(
-    game_id="0022500001",
-    season="2025-26",
-    game_date=datetime(2026, 3, 13, 0, 0, tzinfo=timezone.utc),
-    game_time_utc=datetime(2026, 3, 13, 23, 30, tzinfo=timezone.utc),
-    home_team=MAVERICKS,
-    away_team=LAKERS,
-    game_status=1,
-    status_text="7:30 PM ET",
-    home_team_score=None,
-    away_team_score=None,
-    period=None,
-    game_clock=None,
-    prop_count=0,
-    edge_count=0,
-)
-
-
-@router.get("/today", response_model=list[GameResponse])
-def get_games_today() -> list[GameResponse]:
-    return [GAME]
+@router.get("/today", response_model=list[GameDetailResponse])
+def get_games_today(db: Session = Depends(get_db)) -> list[GameDetailResponse]:
+    return game_service.get_games_today(db)
 
 
 @router.get("/{game_id}", response_model=GameDetailResponse)
-def get_game_detail(game_id: str) -> GameDetailResponse:
-    return GAME.model_copy(update={"game_id": game_id})
+def get_game_detail(game_id: str, db: Session = Depends(get_db)) -> GameDetailResponse:
+    result = game_service.get_game_detail(db, game_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Game {game_id!r} not found")
+    return result

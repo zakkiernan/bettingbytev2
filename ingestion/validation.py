@@ -4,7 +4,7 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func
+from sqlalchemy import case, func, or_
 
 from database.db import session_scope
 from database.models import (
@@ -30,7 +30,10 @@ from ingestion.rotation_sync import (
     ROTATION_SYNC_STATUS_PENDING,
     ROTATION_SYNC_STATUS_QUARANTINED,
     ROTATION_SYNC_STATUS_RETRY,
+    load_rotation_success_coverage,
+    rotation_missing_player_count,
 )
+from ingestion.rotation_provider import ROTATION_EXPECTED_MINUTES_FLOOR
 
 FINAL_GAME_STATUS = 3
 FINAL_STATUS_TEXT = "Final"
@@ -62,6 +65,39 @@ def _historical_game_counts(session, season: str | None = None) -> dict[str, int
     )
     return {
         row.game_id: int(row.historical_players)
+        for row in rows
+        if _matches_season(row.game_date, season)
+    }
+
+
+def _historical_rotation_counts(session, season: str | None = None) -> dict[str, dict[str, int | datetime | None]]:
+    expected_rotation_case = case(
+        (
+            or_(
+                HistoricalGameLog.minutes.is_(None),
+                HistoricalGameLog.minutes >= ROTATION_EXPECTED_MINUTES_FLOOR,
+            ),
+            1,
+        ),
+        else_=0,
+    )
+    rows = (
+        session.query(
+            HistoricalGameLog.game_id.label("game_id"),
+            func.count(HistoricalGameLog.player_id).label("historical_players"),
+            func.sum(expected_rotation_case).label("expected_rotation_players"),
+            func.min(HistoricalGameLog.game_date).label("game_date"),
+        )
+        .group_by(HistoricalGameLog.game_id)
+        .all()
+    )
+
+    return {
+        row.game_id: {
+            "historical_players": int(row.historical_players),
+            "expected_rotation_players": int(row.expected_rotation_players or 0),
+            "game_date": row.game_date,
+        }
         for row in rows
         if _matches_season(row.game_date, season)
     }
@@ -100,7 +136,7 @@ def get_postgame_enrichment_backlog(season: str | None = None) -> list[dict[str,
 
 def get_rotation_backlog(season: str | None = None) -> list[dict[str, int | str]]:
     with session_scope() as session:
-        hist_counts = _historical_game_counts(session, season=season)
+        hist_counts = _historical_rotation_counts(session, season=season)
         rotation_counts = {
             row.game_id: int(row.rotation_players)
             for row in session.query(
@@ -111,17 +147,27 @@ def get_rotation_backlog(season: str | None = None) -> list[dict[str, int | str]
             .group_by(PlayerRotationGame.game_id)
             .all()
         }
+        success_coverage = load_rotation_success_coverage(session, set(hist_counts.keys()))
 
     backlog: list[dict[str, int | str]] = []
-    for game_id, historical_players in hist_counts.items():
+    for game_id, historical_row in hist_counts.items():
         rotation_players = rotation_counts.get(game_id, 0)
-        if rotation_players < historical_players:
+        coverage_metrics = success_coverage.get(game_id)
+        missing_players = rotation_missing_player_count(historical_row, rotation_players, coverage_metrics)
+        if missing_players > 0:
+            covered_players = max(
+                int(rotation_players),
+                int((coverage_metrics or {}).get("mapped_player_count") or 0),
+                int((coverage_metrics or {}).get("covered_player_count") or 0),
+            )
             backlog.append(
                 {
                     "game_id": game_id,
-                    "historical_players": historical_players,
+                    "historical_players": int(historical_row["historical_players"]),
+                    "expected_rotation_players": int(historical_row["expected_rotation_players"]),
                     "rotation_players": rotation_players,
-                    "missing_players": historical_players - rotation_players,
+                    "covered_players": covered_players,
+                    "missing_players": missing_players,
                 }
             )
 

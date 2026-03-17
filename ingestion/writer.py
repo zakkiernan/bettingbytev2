@@ -5,6 +5,8 @@ import logging
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy import MetaData, Table, delete, insert, select, update
+
 from database.db import session_scope
 from database.models import (
     Game,
@@ -180,6 +182,10 @@ def write_pregame_context_snapshots(rows: list[dict[str, Any]], *, captured_at: 
                 "missing_frontcourt_rotation_piece": row.get("missing_frontcourt_rotation_piece"),
                 "vacated_minutes_proxy": float(row["vacated_minutes_proxy"]) if row.get("vacated_minutes_proxy") is not None else None,
                 "vacated_usage_proxy": float(row["vacated_usage_proxy"]) if row.get("vacated_usage_proxy") is not None else None,
+                "role_replacement_minutes_proxy": float(row["role_replacement_minutes_proxy"]) if row.get("role_replacement_minutes_proxy") is not None else None,
+                "role_replacement_usage_proxy": float(row["role_replacement_usage_proxy"]) if row.get("role_replacement_usage_proxy") is not None else None,
+                "role_replacement_touches_proxy": float(row["role_replacement_touches_proxy"]) if row.get("role_replacement_touches_proxy") is not None else None,
+                "role_replacement_passes_proxy": float(row["role_replacement_passes_proxy"]) if row.get("role_replacement_passes_proxy") is not None else None,
                 "projected_lineup_confirmed": row.get("projected_lineup_confirmed"),
                 "official_starter_flag": row.get("official_starter_flag"),
                 "pregame_context_confidence": float(row["pregame_context_confidence"]) if row.get("pregame_context_confidence") is not None else None,
@@ -322,46 +328,78 @@ def write_prop_snapshot(props: list[dict[str, Any]], is_live: bool = False, snap
         return
 
     with session_scope() as session:
-        for prop in props:
-            existing = (
-                session.query(PlayerPropSnapshot)
-                .filter(
-                    PlayerPropSnapshot.game_id == prop["game_id"],
-                    PlayerPropSnapshot.player_id == prop["player_id"],
-                    PlayerPropSnapshot.stat_type == prop["stat_type"],
-                    PlayerPropSnapshot.is_live == is_live,
-                    PlayerPropSnapshot.snapshot_phase == snapshot_phase,
-                )
-                .first()
-            )
+        table = Table("player_prop_snapshots", MetaData(), autoload_with=session.bind)
+        has_snapshot_phase = "snapshot_phase" in table.c
+        affected_game_ids = sorted({str(prop["game_id"]) for prop in props if prop.get("game_id")})
+        incoming_keys = {
+            (str(prop["game_id"]), str(prop["player_id"]), str(prop["stat_type"]))
+            for prop in props
+        }
 
-            if existing:
-                existing.player_name = prop["player_name"]
-                existing.team = prop.get("team")
-                existing.opponent = prop.get("opponent")
-                existing.line = prop["line"]
-                existing.over_odds = prop["over_odds"]
-                existing.under_odds = prop["under_odds"]
-                existing.snapshot_phase = snapshot_phase
-                existing.captured_at = prop["captured_at"]
+        for prop in props:
+            filters = [
+                table.c.game_id == prop["game_id"],
+                table.c.player_id == prop["player_id"],
+                table.c.stat_type == prop["stat_type"],
+                table.c.is_live == is_live,
+            ]
+            if has_snapshot_phase:
+                filters.append(table.c.snapshot_phase == snapshot_phase)
+
+            existing_id = session.execute(
+                select(table.c.id).where(*filters).limit(1)
+            ).scalar_one_or_none()
+
+            payload = {
+                "game_id": prop["game_id"],
+                "player_id": prop["player_id"],
+                "player_name": prop["player_name"],
+                "team": prop.get("team"),
+                "opponent": prop.get("opponent"),
+                "stat_type": prop["stat_type"],
+                "line": prop["line"],
+                "over_odds": prop["over_odds"],
+                "under_odds": prop["under_odds"],
+                "is_live": is_live,
+                "captured_at": prop["captured_at"],
+            }
+            if has_snapshot_phase:
+                payload["snapshot_phase"] = snapshot_phase
+
+            if existing_id is not None:
+                session.execute(
+                    update(table)
+                    .where(table.c.id == existing_id)
+                    .values(**payload)
+                )
                 continue
 
-            session.add(
-                PlayerPropSnapshot(
-                    game_id=prop["game_id"],
-                    player_id=prop["player_id"],
-                    player_name=prop["player_name"],
-                    team=prop.get("team"),
-                    opponent=prop.get("opponent"),
-                    stat_type=prop["stat_type"],
-                    line=prop["line"],
-                    over_odds=prop["over_odds"],
-                    under_odds=prop["under_odds"],
-                    is_live=is_live,
-                    snapshot_phase=snapshot_phase,
-                    captured_at=prop["captured_at"],
-                )
-            )
+            session.execute(insert(table).values(**payload))
+
+        if affected_game_ids:
+            stale_filters = [
+                table.c.game_id.in_(affected_game_ids),
+                table.c.is_live == is_live,
+            ]
+            if has_snapshot_phase:
+                stale_filters.append(table.c.snapshot_phase == snapshot_phase)
+
+            current_rows = session.execute(
+                select(
+                    table.c.id,
+                    table.c.game_id,
+                    table.c.player_id,
+                    table.c.stat_type,
+                ).where(*stale_filters)
+            ).all()
+
+            stale_ids = [
+                row.id
+                for row in current_rows
+                if (str(row.game_id), str(row.player_id), str(row.stat_type)) not in incoming_keys
+            ]
+            if stale_ids:
+                session.execute(delete(table).where(table.c.id.in_(stale_ids)))
 
     logger.info("Upserted %s player prop snapshots for %s phase", len(props), snapshot_phase)
 

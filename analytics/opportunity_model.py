@@ -2,7 +2,28 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 
-from analytics.features_opportunity import PregameOpportunityFeatures, _weighted_average
+from analytics.features_opportunity import PregameOpportunityFeatures
+from analytics.opportunity_context import (
+    VacancyAdjustment as _VacancyAdjustment,
+    apply_official_team_fallback_adjustments,
+    apply_role_vacancy_adjustments,
+)
+from analytics.opportunity_math import clamp as _clamp
+from analytics.opportunity_math import value_or_zero as _value_or_zero
+from analytics.opportunity_minutes import (
+    MinutesBaselineEstimate as _MinutesBaselineEstimate,
+    apply_minutes_availability_gate,
+    compute_minutes_stability,
+    compute_rotation_minutes_stability,
+    estimate_minutes_baseline,
+)
+from analytics.opportunity_rotation import (
+    compute_closed_alignment,
+    compute_rotation_role_score,
+    compute_started_alignment,
+    estimate_rotation_baseline,
+)
+from analytics.opportunity_usage import compute_offensive_role_score, compute_usage_alignment, estimate_usage_baseline
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +101,36 @@ class PregameOpportunityModelConfig:
     context_primary_ballhandler_usage_bonus: float = 0.012
     context_primary_ballhandler_touches_bonus: float = 4.0
     context_primary_ballhandler_passes_bonus: float = 4.0
+    context_frontcourt_minutes_bonus: float = 1.4
+    role_replacement_minutes_factor: float = 0.11
+    role_replacement_minutes_cap: float = 5.5
+    role_replacement_usage_factor: float = 0.18
+    role_replacement_usage_cap: float = 0.04
+    role_replacement_touches_factor: float = 0.08
+    role_replacement_touches_cap: float = 7.0
+    role_replacement_passes_factor: float = 0.08
+    role_replacement_passes_cap: float = 6.0
+    absence_impact_minutes_factor: float = 0.0
+    absence_impact_minutes_cap: float = 0.0
+    absence_impact_usage_factor: float = 0.22
+    absence_impact_usage_cap: float = 0.015
+    absence_impact_touches_factor: float = 0.08
+    absence_impact_touches_cap: float = 3.5
+    absence_impact_passes_factor: float = 0.08
+    absence_impact_passes_cap: float = 2.5
+    absence_impact_confidence_floor: float = 0.35
+    official_team_injury_minutes_bonus_cap: float = 8.0
+    official_team_injury_start_rate_bonus_cap: float = 0.18
+    official_team_injury_touch_bonus_per_minute: float = 1.2
+    official_team_injury_pass_bonus_per_minute: float = 0.8
+    official_team_injury_out_threshold: float = 2.0
+    official_team_injury_out_scale: float = 5.0
+    official_team_injury_top9_scale: float = 4.0
+    official_team_injury_vacated_minutes_scale: float = 72.0
+    official_team_injury_high_usage_scale: float = 2.0
+    official_team_injury_headroom_target: float = 24.0
+    official_team_injury_headroom_scale: float = 16.0
+    official_team_injury_candidate_minutes_scale: float = 18.0
     projected_unavailable_minutes_scale: float = 0.35
     projected_unavailable_usage_scale: float = 0.70
     projected_unavailable_touches_scale: float = 0.50
@@ -104,6 +155,10 @@ class PregameOpportunityBreakdown:
     availability_modifier: float
     vacated_minutes_bonus: float
     vacated_usage_bonus: float
+    role_replacement_minutes_bonus: float
+    role_replacement_usage_bonus: float
+    absence_impact_minutes_bonus: float
+    absence_impact_usage_bonus: float
     role_stability: float
     rotation_role_score: float
     offensive_role_score: float
@@ -147,123 +202,26 @@ class _AvailabilityAdjustedRole:
     availability_modifier: float
 
 
-@dataclass(slots=True)
-class _VacancyAdjustment:
-    expected_minutes: float
-    expected_usage_pct: float
-    expected_est_usage_pct: float
-    expected_touches: float
-    expected_passes: float
-    expected_start_rate: float
-    vacated_minutes_bonus: float
-    vacated_usage_bonus: float
-
-
-
-def _value_or_zero(value: float | None) -> float:
-    return float(value) if value is not None else 0.0
-
-
-
-def _clamp(value: float, lower: float, upper: float) -> float:
-    return max(lower, min(value, upper))
-
-
-
-def _regress_to_target(value: float, *, target: float, factor: float, lower: float | None = None, upper: float | None = None) -> float:
-    regressed = target + factor * (value - target)
-    if lower is not None or upper is not None:
-        regressed = _clamp(regressed, lower if lower is not None else regressed, upper if upper is not None else regressed)
-    return regressed
-
-
 
 def _estimate_baseline_role(
     features: PregameOpportunityFeatures,
     config: PregameOpportunityModelConfig,
 ) -> _BaselineRoleEstimate:
-    box_expected_minutes = _weighted_average(
-        [(weight, getattr(features, attr)) for weight, attr in config.expected_minutes_weights]
-    )
-    rotation_expected_minutes = _weighted_average(
-        [(weight, getattr(features, attr)) for weight, attr in config.expected_rotation_minutes_weights]
-    )
-    expected_usage_pct = _weighted_average(
-        [(weight, getattr(features, attr)) for weight, attr in config.expected_usage_weights]
-    ) or 0.0
-    expected_est_usage_pct = _weighted_average(
-        [(weight, getattr(features, attr)) for weight, attr in config.expected_est_usage_weights]
-    ) or 0.0
-    expected_touches = _weighted_average(
-        [(weight, getattr(features, attr)) for weight, attr in config.touches_weights]
-    ) or 0.0
-    expected_passes = _weighted_average(
-        [(weight, getattr(features, attr)) for weight, attr in config.passes_weights]
-    ) or 0.0
-    expected_stint_count = _weighted_average(
-        [(weight, getattr(features, attr)) for weight, attr in config.stint_count_weights]
-    ) or 0.0
-    expected_start_rate = _weighted_average(
-        [(weight, getattr(features, attr)) for weight, attr in config.started_rate_weights]
-    ) or 0.0
-    expected_close_rate = _weighted_average(
-        [(weight, getattr(features, attr)) for weight, attr in config.closed_rate_weights]
-    ) or 0.0
-
-    rotation_sample_confidence = _clamp(features.rotation_sample_size / config.rotation_sample_scale, 0.0, 1.0)
-    rotation_minutes_weight = (
-        config.rotation_minutes_blend_max_weight * rotation_sample_confidence if rotation_expected_minutes is not None else 0.0
-    )
-    expected_minutes = _weighted_average(
-        [
-            (1.0 - rotation_minutes_weight, box_expected_minutes),
-            (rotation_minutes_weight, rotation_expected_minutes),
-        ]
-    )
-    if expected_minutes is None:
-        expected_minutes = box_expected_minutes or rotation_expected_minutes or 0.0
+    minutes_baseline = estimate_minutes_baseline(features, config)
+    rotation_baseline = estimate_rotation_baseline(features, config)
+    usage_baseline = estimate_usage_baseline(features, config)
 
     return _BaselineRoleEstimate(
-        expected_minutes=_regress_to_target(
-            expected_minutes,
-            target=config.minutes_regression_target,
-            factor=config.minutes_regression_factor,
-            lower=0.0,
-            upper=48.0,
-        ),
-        rotation_expected_minutes=_value_or_zero(rotation_expected_minutes),
-        expected_usage_pct=_regress_to_target(
-            expected_usage_pct,
-            target=config.usage_regression_target,
-            factor=config.usage_regression_factor,
-            lower=0.0,
-            upper=0.5,
-        ),
-        expected_est_usage_pct=_regress_to_target(
-            expected_est_usage_pct,
-            target=config.est_usage_regression_target,
-            factor=config.est_usage_regression_factor,
-            lower=0.0,
-            upper=0.5,
-        ),
-        expected_touches=max(0.0, expected_touches * config.touches_scale_factor),
-        expected_passes=max(0.0, expected_passes * config.passes_scale_factor),
-        expected_stint_count=expected_stint_count,
-        expected_start_rate=_regress_to_target(
-            expected_start_rate,
-            target=config.rate_regression_target,
-            factor=config.start_rate_regression_factor,
-            lower=0.0,
-            upper=1.0,
-        ),
-        expected_close_rate=_regress_to_target(
-            expected_close_rate,
-            target=config.rate_regression_target,
-            factor=config.close_rate_regression_factor,
-            lower=0.0,
-            upper=1.0,
-        ),
-        rotation_sample_confidence=rotation_sample_confidence,
+        expected_minutes=minutes_baseline.expected_minutes,
+        rotation_expected_minutes=minutes_baseline.rotation_expected_minutes,
+        expected_usage_pct=usage_baseline.expected_usage_pct,
+        expected_est_usage_pct=usage_baseline.expected_est_usage_pct,
+        expected_touches=usage_baseline.expected_touches,
+        expected_passes=usage_baseline.expected_passes,
+        expected_stint_count=rotation_baseline.expected_stint_count,
+        expected_start_rate=rotation_baseline.expected_start_rate,
+        expected_close_rate=rotation_baseline.expected_close_rate,
+        rotation_sample_confidence=minutes_baseline.rotation_sample_confidence,
     )
 
 
@@ -275,41 +233,45 @@ def _apply_availability_gate(
     *,
     pregame_context_confidence: float,
 ) -> _AvailabilityAdjustedRole:
-    expected_minutes = baseline.expected_minutes
     expected_usage_pct = baseline.expected_usage_pct
     expected_est_usage_pct = baseline.expected_est_usage_pct
     expected_touches = baseline.expected_touches
     expected_passes = baseline.expected_passes
     expected_start_rate = baseline.expected_start_rate
     expected_close_rate = baseline.expected_close_rate
-    availability_modifier = 1.0
+
+    minutes_adjustment = apply_minutes_availability_gate(
+        _MinutesBaselineEstimate(
+            expected_minutes=baseline.expected_minutes,
+            rotation_expected_minutes=baseline.rotation_expected_minutes,
+            rotation_sample_confidence=baseline.rotation_sample_confidence,
+        ),
+        features,
+        config,
+        pregame_context_confidence=pregame_context_confidence,
+    )
+    expected_minutes = minutes_adjustment.expected_minutes
+    availability_modifier = minutes_adjustment.availability_modifier
 
     if features.official_available is False:
         return _AvailabilityAdjustedRole(
-            expected_minutes=min(expected_minutes, config.official_unavailable_minutes_cap),
+            expected_minutes=expected_minutes,
             expected_usage_pct=expected_usage_pct * 0.35,
             expected_est_usage_pct=expected_est_usage_pct * 0.35,
             expected_touches=expected_touches * 0.25,
             expected_passes=expected_passes * 0.25,
             expected_start_rate=0.0,
             expected_close_rate=0.0,
-            availability_modifier=0.1,
+            availability_modifier=availability_modifier,
         )
 
     if features.projected_available is False:
-        expected_minutes *= config.projected_unavailable_minutes_scale
         expected_usage_pct *= config.projected_unavailable_usage_scale
         expected_est_usage_pct *= config.projected_unavailable_usage_scale
         expected_touches *= config.projected_unavailable_touches_scale
         expected_passes *= config.projected_unavailable_touches_scale
         expected_start_rate *= 0.25
         expected_close_rate *= 0.25
-        availability_modifier *= config.projected_unavailable_minutes_scale
-
-    late_scratch_risk = _value_or_zero(features.late_scratch_risk)
-    scratch_scale = 1.0 - (config.late_scratch_minutes_penalty * pregame_context_confidence * late_scratch_risk)
-    expected_minutes *= _clamp(scratch_scale, 0.55, 1.0)
-    availability_modifier *= _clamp(1.0 - 0.65 * late_scratch_risk * pregame_context_confidence, 0.2, 1.0)
 
     return _AvailabilityAdjustedRole(
         expected_minutes=expected_minutes,
@@ -321,87 +283,6 @@ def _apply_availability_gate(
         expected_close_rate=expected_close_rate,
         availability_modifier=availability_modifier,
     )
-
-
-
-def _apply_role_vacancy_adjustments(
-    role: _AvailabilityAdjustedRole,
-    baseline: _BaselineRoleEstimate,
-    features: PregameOpportunityFeatures,
-    config: PregameOpportunityModelConfig,
-    *,
-    pregame_context_confidence: float,
-    starter_confidence: float,
-) -> _VacancyAdjustment:
-    expected_minutes = role.expected_minutes
-    expected_usage_pct = role.expected_usage_pct
-    expected_est_usage_pct = role.expected_est_usage_pct
-    expected_touches = role.expected_touches
-    expected_passes = role.expected_passes
-    expected_start_rate = role.expected_start_rate
-
-    if role.availability_modifier <= 0.15:
-        return _VacancyAdjustment(
-            expected_minutes=expected_minutes,
-            expected_usage_pct=expected_usage_pct,
-            expected_est_usage_pct=expected_est_usage_pct,
-            expected_touches=expected_touches,
-            expected_passes=expected_passes,
-            expected_start_rate=expected_start_rate,
-            vacated_minutes_bonus=0.0,
-            vacated_usage_bonus=0.0,
-        )
-
-    if features.expected_start is not None:
-        context_start_rate = 1.0 if features.expected_start else 0.0
-        start_blend_weight = _clamp(
-            config.context_start_rate_weight * pregame_context_confidence * max(starter_confidence, 0.35),
-            0.0,
-            0.85,
-        )
-        expected_start_rate = _weighted_average(
-            [
-                (1.0 - start_blend_weight, expected_start_rate),
-                (start_blend_weight, context_start_rate),
-            ]
-        ) or expected_start_rate
-
-    vacated_minutes_bonus = _clamp(
-        _value_or_zero(features.vacated_minutes_proxy) * config.context_minutes_vacated_factor,
-        0.0,
-        config.context_minutes_vacated_cap,
-    ) * pregame_context_confidence
-    expected_minutes += vacated_minutes_bonus
-
-    vacated_usage_bonus = _clamp(
-        _value_or_zero(features.vacated_usage_proxy) * config.context_usage_vacated_factor
-        + _value_or_zero(features.missing_high_usage_teammates) * config.context_usage_missing_teammate_bonus
-        + (config.context_primary_ballhandler_usage_bonus if features.missing_primary_ballhandler else 0.0),
-        0.0,
-        config.context_usage_vacated_cap,
-    ) * pregame_context_confidence
-    expected_usage_pct = _clamp(expected_usage_pct + vacated_usage_bonus, 0.0, 0.5)
-    expected_est_usage_pct = _clamp(expected_est_usage_pct + vacated_usage_bonus * 0.85, 0.0, 0.5)
-    expected_touches += _clamp(
-        _value_or_zero(features.vacated_minutes_proxy) * config.context_touch_vacated_factor,
-        0.0,
-        config.context_touch_vacated_cap,
-    ) * pregame_context_confidence
-    if features.missing_primary_ballhandler:
-        expected_touches += config.context_primary_ballhandler_touches_bonus * pregame_context_confidence
-        expected_passes += config.context_primary_ballhandler_passes_bonus * pregame_context_confidence
-
-    return _VacancyAdjustment(
-        expected_minutes=expected_minutes,
-        expected_usage_pct=expected_usage_pct,
-        expected_est_usage_pct=expected_est_usage_pct,
-        expected_touches=expected_touches,
-        expected_passes=expected_passes,
-        expected_start_rate=expected_start_rate,
-        vacated_minutes_bonus=vacated_minutes_bonus,
-        vacated_usage_bonus=vacated_usage_bonus,
-    )
-
 
 
 def project_pregame_opportunity(
@@ -417,13 +298,20 @@ def project_pregame_opportunity(
         config,
         pregame_context_confidence=pregame_context_confidence,
     )
-    vacancy = _apply_role_vacancy_adjustments(
+    vacancy = apply_role_vacancy_adjustments(
         availability,
         baseline,
         features,
         config,
         pregame_context_confidence=pregame_context_confidence,
         starter_confidence=starter_confidence,
+    )
+    vacancy = apply_official_team_fallback_adjustments(
+        vacancy,
+        availability,
+        baseline,
+        features,
+        config,
     )
 
     expected_minutes = vacancy.expected_minutes
@@ -435,23 +323,11 @@ def project_pregame_opportunity(
     expected_close_rate = availability.expected_close_rate
     expected_stint_count = baseline.expected_stint_count
 
-    minutes_stability = 1.0 - _clamp(_value_or_zero(features.last10_minutes_std) / 8.0, 0.0, 1.0)
-    rotation_minutes_stability = 1.0 - _clamp(_value_or_zero(features.last10_rotation_minutes_std) / 8.0, 0.0, 1.0)
-    usage_alignment = 1.0 - _clamp(
-        abs(_value_or_zero(features.last5_usage_pct) - _value_or_zero(features.season_usage_pct)) / 0.12,
-        0.0,
-        1.0,
-    )
-    started_alignment = 1.0 - _clamp(
-        abs(_value_or_zero(features.last5_started_rate) - _value_or_zero(features.season_started_rate)),
-        0.0,
-        1.0,
-    )
-    closed_alignment = 1.0 - _clamp(
-        abs(_value_or_zero(features.last5_closed_rate) - _value_or_zero(features.season_closed_rate)),
-        0.0,
-        1.0,
-    )
+    minutes_stability = compute_minutes_stability(features)
+    rotation_minutes_stability = compute_rotation_minutes_stability(features)
+    usage_alignment = compute_usage_alignment(features)
+    started_alignment = compute_started_alignment(features)
+    closed_alignment = compute_closed_alignment(features)
     context_alignment = 0.5
     if features.projected_available is not None or features.official_available is not None:
         projected = features.projected_available
@@ -477,32 +353,21 @@ def project_pregame_opportunity(
         1.0,
     )
 
-    minutes_score = _clamp(expected_minutes / config.expected_minutes_scale, 0.0, 1.2)
-    usage_score = _clamp(((expected_usage_pct + expected_est_usage_pct) / 2.0) / 0.30, 0.0, 1.2)
-    touches_score = _clamp(expected_touches / config.touches_scale, 0.0, 1.2)
-    passes_score = _clamp(expected_passes / config.passes_scale, 0.0, 1.2)
-    rotation_minutes_score = _clamp(baseline.rotation_expected_minutes / config.expected_minutes_scale, 0.0, 1.2)
-    stint_pattern_score = 1.0 - _clamp(
-        abs(expected_stint_count - config.typical_stint_count) / config.typical_stint_count,
-        0.0,
-        1.0,
+    rotation_role_score = compute_rotation_role_score(
+        expected_start_rate=expected_start_rate,
+        expected_close_rate=expected_close_rate,
+        expected_stint_count=expected_stint_count,
+        rotation_expected_minutes=baseline.rotation_expected_minutes,
+        config=config,
     )
-    rotation_role_score = _clamp(
-        0.46 * rotation_minutes_score
-        + 0.24 * expected_start_rate
-        + 0.15 * expected_close_rate
-        + 0.15 * stint_pattern_score,
-        0.0,
-        1.25,
-    )
-    offensive_role_score = _clamp(
-        0.34 * minutes_score
-        + 0.30 * usage_score
-        + 0.14 * touches_score
-        + 0.08 * passes_score
-        + 0.14 * rotation_role_score,
-        0.0,
-        1.25,
+    offensive_role_score = compute_offensive_role_score(
+        expected_minutes=expected_minutes,
+        expected_usage_pct=expected_usage_pct,
+        expected_est_usage_pct=expected_est_usage_pct,
+        expected_touches=expected_touches,
+        expected_passes=expected_passes,
+        rotation_role_score=rotation_role_score,
+        config=config,
     )
 
     matchup_environment_score = 0.5
@@ -550,6 +415,10 @@ def project_pregame_opportunity(
             availability_modifier=round(availability.availability_modifier, 4),
             vacated_minutes_bonus=round(vacancy.vacated_minutes_bonus, 3),
             vacated_usage_bonus=round(vacancy.vacated_usage_bonus, 4),
+            role_replacement_minutes_bonus=round(vacancy.role_replacement_minutes_bonus, 3),
+            role_replacement_usage_bonus=round(vacancy.role_replacement_usage_bonus, 4),
+            absence_impact_minutes_bonus=round(vacancy.absence_impact_minutes_bonus, 3),
+            absence_impact_usage_bonus=round(vacancy.absence_impact_usage_bonus, 4),
             role_stability=round(role_stability, 4),
             rotation_role_score=round(rotation_role_score, 4),
             offensive_role_score=round(offensive_role_score, 4),

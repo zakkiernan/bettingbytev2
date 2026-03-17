@@ -10,6 +10,8 @@ from typing import Any
 
 import httpx
 
+from database.db import session_scope
+from database.models import HistoricalGameLog
 from ingestion.nba_client import get_player_id_map, get_todays_games_bundle
 
 logger = logging.getLogger(__name__)
@@ -129,6 +131,29 @@ def _resolve_player_identity(player_name: str, player_id_map: dict[str, str]) ->
     return None, player_name
 
 
+def _load_recent_player_team_context() -> dict[str, str]:
+    with session_scope() as session:
+        rows = (
+            session.query(
+                HistoricalGameLog.player_id,
+                HistoricalGameLog.team,
+                HistoricalGameLog.game_date,
+            )
+            .order_by(HistoricalGameLog.player_id, HistoricalGameLog.game_date.desc())
+            .all()
+        )
+
+    player_team_by_id: dict[str, str] = {}
+    for player_id, team, _ in rows:
+        normalized_player_id = str(player_id)
+        if normalized_player_id in player_team_by_id:
+            continue
+        if not team:
+            continue
+        player_team_by_id[normalized_player_id] = str(team)
+    return player_team_by_id
+
+
 def fetch_nba_events(client: httpx.Client) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     try:
         response = client.get(
@@ -196,6 +221,8 @@ def build_event_mappings(fd_events: list[dict[str, Any]], captured_at: datetime)
                 "event_id": event["event_id"],
                 "event_name": event["event_name"],
                 "nba_game_id": matched_game["game_id"] if matched_game else None,
+                "home_team_abbreviation": matched_game["home_team_abbreviation"] if matched_game else None,
+                "away_team_abbreviation": matched_game["away_team_abbreviation"] if matched_game else None,
                 "captured_at": captured_at,
             }
         )
@@ -206,10 +233,14 @@ def parse_event_props(
     event_mapping: dict[str, Any],
     raw_data: dict[str, Any],
     player_id_map: dict[str, str],
+    player_team_context: dict[str, str],
     captured_at: datetime,
 ) -> list[dict[str, Any]]:
     props: list[dict[str, Any]] = []
     markets = raw_data.get("attachments", {}).get("markets", {})
+    home_team = event_mapping.get("home_team_abbreviation")
+    away_team = event_mapping.get("away_team_abbreviation")
+    event_teams = {team for team in (home_team, away_team) if team}
 
     for market in markets.values():
         if not isinstance(market, dict):
@@ -248,6 +279,16 @@ def parse_event_props(
             logger.warning("Could not map FanDuel player name '%s'", player_name)
             continue
 
+        player_team = player_team_context.get(str(player_id))
+        if event_teams and player_team not in event_teams:
+            continue
+
+        opponent = None
+        if player_team == home_team:
+            opponent = away_team
+        elif player_team == away_team:
+            opponent = home_team
+
         if not event_mapping.get("nba_game_id"):
             logger.warning("Skipping FanDuel event %s because it has no NBA game mapping", event_mapping["event_id"])
             continue
@@ -257,6 +298,8 @@ def parse_event_props(
                 "game_id": event_mapping["nba_game_id"],
                 "player_id": player_id,
                 "player_name": canonical_player_name,
+                "team": player_team,
+                "opponent": opponent,
                 "stat_type": stat_type,
                 "line": line,
                 "over_odds": int(over_odds),
@@ -273,6 +316,7 @@ def parse_event_props(
 
 def fetch_current_prop_board() -> dict[str, Any]:
     player_id_map = get_player_id_map()
+    player_team_context = _load_recent_player_team_context()
     payloads: list[dict[str, Any]] = []
     captured_at = datetime.utcnow()
 
@@ -296,7 +340,15 @@ def fetch_current_prop_board() -> dict[str, Any]:
                 payloads.extend(event_payloads)
                 if not raw_data:
                     continue
-                all_props.extend(parse_event_props(mapping, raw_data, player_id_map, captured_at=captured_at))
+                all_props.extend(
+                    parse_event_props(
+                        mapping,
+                        raw_data,
+                        player_id_map,
+                        player_team_context,
+                        captured_at=captured_at,
+                    )
+                )
 
     return {"props": all_props, "event_mappings": event_mappings, "payloads": payloads, "captured_at": captured_at}
 

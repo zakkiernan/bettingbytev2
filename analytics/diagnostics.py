@@ -25,6 +25,8 @@ class PregamePointsMissAnalysis:
     examples: list[dict[str, object]]
     pregame_context_attached_count: int = 0
     pregame_context_missing_count: int = 0
+    official_injury_attached_count: int = 0
+    injury_only_context_count: int = 0
     line_available_count: int = 0
     line_missing_count: int = 0
     with_pregame_context_buckets: list[PregamePointsMissBucket] | None = None
@@ -47,6 +49,8 @@ class PregameOpportunityMissAnalysis:
     examples: list[dict[str, object]]
     pregame_context_attached_count: int = 0
     pregame_context_missing_count: int = 0
+    official_injury_attached_count: int = 0
+    injury_only_context_count: int = 0
     with_pregame_context_buckets: list[PregameOpportunityMissBucket] | None = None
     without_pregame_context_buckets: list[PregameOpportunityMissBucket] | None = None
 
@@ -102,6 +106,12 @@ def analyze_pregame_points_misses(result: PregamePointsBacktestResult, *, top_n:
     ]
     with_context_rows = [row for row in rows if getattr(row, "pregame_context_attached", False)]
     without_context_rows = [row for row in rows if not getattr(row, "pregame_context_attached", False)]
+    official_injury_rows = [row for row in rows if getattr(row, "official_injury_attached", False)]
+    injury_only_rows = [
+        row
+        for row in rows
+        if getattr(row, "official_injury_attached", False) and not getattr(row, "pregame_context_attached", False)
+    ]
     with_line_rows = [row for row in rows if getattr(row, "line_available", False)]
     without_line_rows = [row for row in rows if not getattr(row, "line_available", False)]
     with_context_counts = Counter(_classify_row(row) for row in with_context_rows)
@@ -121,6 +131,8 @@ def analyze_pregame_points_misses(result: PregamePointsBacktestResult, *, top_n:
                 "expected_minutes": row.expected_minutes,
                 "error": row.error,
                 "pregame_context_attached": bool(getattr(row, "pregame_context_attached", False)),
+                "official_injury_attached": bool(getattr(row, "official_injury_attached", False)),
+                "context_source": getattr(row, "context_source", None),
                 "line_available": bool(getattr(row, "line_available", False)),
                 "category": _classify_row(row),
             }
@@ -131,6 +143,8 @@ def analyze_pregame_points_misses(result: PregamePointsBacktestResult, *, top_n:
         examples=examples,
         pregame_context_attached_count=len(with_context_rows),
         pregame_context_missing_count=len(without_context_rows),
+        official_injury_attached_count=len(official_injury_rows),
+        injury_only_context_count=len(injury_only_rows),
         line_available_count=len(with_line_rows),
         line_missing_count=len(without_line_rows),
         with_pregame_context_buckets=[
@@ -169,6 +183,12 @@ def analyze_pregame_opportunity_misses(
     ]
     with_context_rows = [row for row in rows if getattr(row, "pregame_context_attached", False)]
     without_context_rows = [row for row in rows if not getattr(row, "pregame_context_attached", False)]
+    official_injury_rows = [row for row in rows if getattr(row, "official_injury_attached", False)]
+    injury_only_rows = [
+        row
+        for row in rows
+        if getattr(row, "official_injury_attached", False) and not getattr(row, "pregame_context_attached", False)
+    ]
     with_context_counts = Counter(_classify_opportunity_row(row) for row in with_context_rows)
     without_context_counts = Counter(_classify_opportunity_row(row) for row in without_context_rows)
     examples = []
@@ -192,6 +212,8 @@ def analyze_pregame_opportunity_misses(
                 "official_teammate_out_count": getattr(row, "official_teammate_out_count", None),
                 "late_scratch_risk": getattr(row, "late_scratch_risk", None),
                 "pregame_context_attached": bool(getattr(row, "pregame_context_attached", False)),
+                "official_injury_attached": bool(getattr(row, "official_injury_attached", False)),
+                "context_source": getattr(row, "context_source", None),
                 "category": _classify_opportunity_row(row),
             }
         )
@@ -201,6 +223,8 @@ def analyze_pregame_opportunity_misses(
         examples=examples,
         pregame_context_attached_count=len(with_context_rows),
         pregame_context_missing_count=len(without_context_rows),
+        official_injury_attached_count=len(official_injury_rows),
+        injury_only_context_count=len(injury_only_rows),
         with_pregame_context_buckets=[
             PregameOpportunityMissBucket(label=label, count=count, pct=round(count / len(with_context_rows), 4) if with_context_rows else 0.0)
             for label, count in with_context_counts.most_common()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
@@ -120,6 +121,28 @@ class DatabaseBackedTestCase(unittest.TestCase):
                 )
             )
 
+    def add_rotation_success_item(self, game_id: str, created_at: datetime, metrics: dict[str, object]) -> None:
+        with db_module.session_scope() as session:
+            run = models.IngestionRun(
+                job_name="test_rotation",
+                status="success",
+                started_at=created_at,
+                finished_at=created_at,
+            )
+            session.add(run)
+            session.flush()
+            session.add(
+                models.IngestionRunItem(
+                    run_id=run.id,
+                    entity_type="game",
+                    entity_key=game_id,
+                    stage="game_rotation",
+                    status="success",
+                    metrics_json=json.dumps(metrics),
+                    created_at=created_at,
+                )
+            )
+
 
 class RotationSyncQueueTests(DatabaseBackedTestCase):
     def setUp(self) -> None:
@@ -178,6 +201,42 @@ class RotationSyncQueueTests(DatabaseBackedTestCase):
         self.assertEqual(selection["selected_game_ids"][2:], ["0022500007", "0022500003", "0022500008"])
         self.assertEqual(selection["quarantined_games"], 1)
 
+    def test_select_rotation_sync_batch_can_revisit_partial_success_for_backfill(self) -> None:
+        rotation_sync.seed_rotation_sync_states("2025-26")
+
+        selection = rotation_sync.select_rotation_sync_batch(
+            season="2025-26",
+            batch_size=6,
+            include_partial_success=True,
+        )
+
+        self.assertEqual(selection["retry_games_selected"], 2)
+        self.assertEqual(selection["pending_games_selected"], 3)
+        self.assertEqual(selection["partial_success_games_selected"], 1)
+        self.assertEqual(selection["selected_game_ids"][-1], "0022500001")
+
+    def test_select_rotation_sync_batch_skips_covered_success_when_metrics_show_zero_window_player(self) -> None:
+        self.add_rotation_success_item(
+            "0022500001",
+            datetime.utcnow(),
+            {
+                "expected_player_count": 2,
+                "mapped_player_count": 1,
+                "covered_player_count": 2,
+                "zero_window_player_count": 1,
+            },
+        )
+        rotation_sync.seed_rotation_sync_states("2025-26")
+
+        selection = rotation_sync.select_rotation_sync_batch(
+            season="2025-26",
+            batch_size=6,
+            include_partial_success=True,
+        )
+
+        self.assertEqual(selection["partial_success_games_selected"], 0)
+        self.assertNotIn("0022500001", selection["selected_game_ids"])
+
     def test_source_missing_game_quarantines_immediately(self) -> None:
         rotation_sync.record_rotation_sync_attempt(
             "0022500003",
@@ -227,6 +286,22 @@ class RotationSyncQueueTests(DatabaseBackedTestCase):
         self.assertNotIn("0022400001", current_rotation)
         self.assertEqual({row["game_id"] for row in current_missing_games}, {f"002250000{i}" for i in range(1, 10)})
         self.assertEqual({row["season"] for row in current_missing_games}, {"2025-26"})
+
+    def test_rotation_backlog_uses_success_coverage_metrics(self) -> None:
+        self.add_rotation_success_item(
+            "0022500001",
+            datetime.utcnow(),
+            {
+                "expected_player_count": 2,
+                "mapped_player_count": 1,
+                "covered_player_count": 2,
+                "zero_window_player_count": 1,
+            },
+        )
+
+        backlog = validation.get_rotation_backlog(season="2025-26")
+
+        self.assertNotIn("0022500001", {row["game_id"] for row in backlog})
 
     def test_summarize_ingestion_health_includes_rotation_queue_metrics(self) -> None:
         rotation_sync.seed_rotation_sync_states("2025-26")
@@ -592,18 +667,55 @@ class SyncGameRotationTests(unittest.TestCase):
         self.assertEqual(run_item_mock.call_args.kwargs["metrics"]["error_type"], "identity_mapping_failure")
         self.assertEqual(run_item_mock.call_args.kwargs["metrics"]["mapped_player_count"], 9)
 
+    def test_sync_rotation_records_success_coverage_metrics(self) -> None:
+        success_result = rotation_provider.RotationBundleResult(
+            rotations=[{"game_id": "0022500127", "player_id": "1"}],
+            team_rotation_games=[{"game_id": "0022500127", "team_id": "1"}],
+            player_rotation_games=[{"game_id": "0022500127", "player_id": "1"}],
+            coverage_metrics={
+                "expected_player_count": 10,
+                "historical_player_count": 12,
+                "mapped_player_count": 9,
+                "covered_player_count": 10,
+                "zero_window_player_count": 1,
+            },
+        )
+
+        with patch("ingestion.jobs.get_rotation_bundle", return_value=success_result), patch(
+            "ingestion.jobs.write_source_payloads"
+        ), patch("ingestion.jobs.write_players"), patch("ingestion.jobs.write_team_rotation_games"), patch(
+            "ingestion.jobs.write_player_rotation_games"
+        ), patch("ingestion.jobs.write_player_rotation_stints"), patch(
+            "ingestion.jobs.create_ingestion_run_item"
+        ) as run_item_mock:
+            result = jobs._sync_rotation_for_game("0022500127", run_id=17)
+
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["coverage_metrics"]["covered_player_count"], 10)
+        self.assertEqual(run_item_mock.call_args.kwargs["metrics"]["expected_player_count"], 10)
+        self.assertEqual(run_item_mock.call_args.kwargs["metrics"]["zero_window_player_count"], 1)
+
 
 class RotationQueueExecutionTests(unittest.TestCase):
     def test_specific_game_retry_batches_do_not_repeat_same_ids(self) -> None:
         selection_calls: list[list[str] | None] = []
 
-        def fake_select_rotation_sync_batch(*, season, batch_size, specific_game_ids, force_retry):
+        def fake_select_rotation_sync_batch(
+            *,
+            season,
+            batch_size,
+            specific_game_ids,
+            force_retry,
+            include_partial_success=False,
+            exclude_game_ids=None,
+        ):
             selection_calls.append(list(specific_game_ids) if specific_game_ids is not None else None)
             if specific_game_ids:
                 return {
                     "selected_game_ids": list(specific_game_ids),
                     "pending_games_selected": 0,
                     "retry_games_selected": len(specific_game_ids),
+                    "partial_success_games_selected": 0,
                     "skipped_cooldown_games": 0,
                     "quarantined_games": 0,
                 }
@@ -611,6 +723,7 @@ class RotationQueueExecutionTests(unittest.TestCase):
                 "selected_game_ids": [],
                 "pending_games_selected": 0,
                 "retry_games_selected": 0,
+                "partial_success_games_selected": 0,
                 "skipped_cooldown_games": 0,
                 "quarantined_games": 0,
             }
@@ -648,6 +761,101 @@ class RotationQueueExecutionTests(unittest.TestCase):
 
         self.assertEqual(result["games_processed"], 2)
         self.assertEqual(selection_calls, [["0022500001", "0022500002"], []])
+
+    def test_backfill_revisits_partial_success_games_once_per_run(self) -> None:
+        selection_calls: list[dict[str, object]] = []
+
+        def fake_select_rotation_sync_batch(
+            *,
+            season,
+            batch_size,
+            specific_game_ids,
+            force_retry,
+            include_partial_success=False,
+            exclude_game_ids=None,
+        ):
+            selection_calls.append(
+                {
+                    "include_partial_success": include_partial_success,
+                    "exclude_game_ids": list(exclude_game_ids) if exclude_game_ids is not None else None,
+                }
+            )
+            if exclude_game_ids:
+                return {
+                    "selected_game_ids": [],
+                    "pending_games_selected": 0,
+                    "retry_games_selected": 0,
+                    "partial_success_games_selected": 0,
+                    "skipped_cooldown_games": 0,
+                    "quarantined_games": 0,
+                }
+            return {
+                "selected_game_ids": ["0022500001"],
+                "pending_games_selected": 0,
+                "retry_games_selected": 0,
+                "partial_success_games_selected": 1,
+                "skipped_cooldown_games": 0,
+                "quarantined_games": 0,
+            }
+
+        with patch("ingestion.jobs.seed_rotation_sync_states", return_value={
+            "seeded_games": 1,
+            "created_states": 0,
+            "success_states": 1,
+            "pending_states": 0,
+            "retry_states": 0,
+            "quarantined_states": 0,
+        }), patch("ingestion.jobs.select_rotation_sync_batch", side_effect=fake_select_rotation_sync_batch), patch(
+            "ingestion.jobs._sync_rotation_for_game",
+            return_value={
+                "rotation_stints": 1,
+                "team_rotation_games": 1,
+                "player_rotation_games": 1,
+                "raw_payloads": 1,
+                "error_type": None,
+                "error_text": None,
+                "error_details": {},
+                "complete": True,
+            },
+        ), patch("ingestion.jobs.record_rotation_sync_attempt"), patch(
+            "ingestion.jobs.get_rotation_backlog",
+            return_value=[{"game_id": "0022500001", "historical_players": 2, "rotation_players": 1, "missing_players": 1}],
+        ):
+            result = jobs._process_rotation_sync_queue_impl(
+                season="2025-26",
+                batch_size=1,
+                max_batches=2,
+                include_partial_success=True,
+                run_id=17,
+            )
+
+        self.assertEqual(result["games_processed"], 1)
+        self.assertEqual(result["partial_success_games_selected"], 1)
+        self.assertTrue(selection_calls[0]["include_partial_success"])
+        self.assertEqual(selection_calls[1]["exclude_game_ids"], ["0022500001"])
+
+    def test_backfill_historical_rotations_enables_partial_success_revisit(self) -> None:
+        with patch("ingestion.jobs._run_logged_job", return_value={"run_id": 11}) as run_logged_job:
+            jobs.backfill_historical_rotations(
+                season="2025-26",
+                batch_size=7,
+                max_batches=2,
+                specific_game_ids=["0022500001"],
+            )
+
+        self.assertEqual(
+            run_logged_job.call_args.args,
+            (
+                "backfill_historical_rotations",
+                jobs._process_rotation_sync_queue_impl,
+                "2025-26",
+                7,
+                2,
+                ["0022500001"],
+                False,
+                True,
+            ),
+        )
 
 class PostgameDecouplingTests(unittest.TestCase):
     def test_postgame_enrichment_enqueues_rotation_without_inline_fetch(self) -> None:

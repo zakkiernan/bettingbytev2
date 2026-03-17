@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func
+from sqlalchemy import case, func, or_
 
 from database.db import session_scope
 from database.models import HistoricalGameLog, IngestionRunItem, PlayerRotationGame, RotationSyncState
+from ingestion.rotation_provider import ROTATION_EXPECTED_MINUTES_FLOOR
 
 ROTATION_SYNC_STATUS_PENDING = "pending"
 ROTATION_SYNC_STATUS_RETRY = "retry"
@@ -69,10 +71,21 @@ def infer_rotation_error_type(error_text: str | None) -> str | None:
 
 
 def _historical_game_rows(session, season: str, specific_game_ids: set[str] | None = None) -> dict[str, dict[str, Any]]:
+    expected_rotation_case = case(
+        (
+            or_(
+                HistoricalGameLog.minutes.is_(None),
+                HistoricalGameLog.minutes >= ROTATION_EXPECTED_MINUTES_FLOOR,
+            ),
+            1,
+        ),
+        else_=0,
+    )
     rows = (
         session.query(
             HistoricalGameLog.game_id.label("game_id"),
             func.count(HistoricalGameLog.player_id).label("historical_players"),
+            func.sum(expected_rotation_case).label("expected_rotation_players"),
             func.min(HistoricalGameLog.game_date).label("game_date"),
         )
         .group_by(HistoricalGameLog.game_id)
@@ -88,6 +101,7 @@ def _historical_game_rows(session, season: str, specific_game_ids: set[str] | No
             continue
         historical_games[game_id] = {
             "historical_players": int(row.historical_players),
+            "expected_rotation_players": int(row.expected_rotation_players or 0),
             "game_date": row.game_date,
         }
     return historical_games
@@ -115,6 +129,90 @@ def _load_existing_states(session, game_ids: set[str]) -> dict[str, RotationSync
         state.game_id: state
         for state in session.query(RotationSyncState).filter(RotationSyncState.game_id.in_(game_ids)).all()
     }
+
+
+def _parse_metrics_json(metrics_json: str | None) -> dict[str, Any]:
+    if not metrics_json:
+        return {}
+    try:
+        parsed = json.loads(metrics_json)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _coerce_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
+
+
+def load_rotation_success_coverage(session, game_ids: set[str]) -> dict[str, dict[str, int]]:
+    if not game_ids:
+        return {}
+
+    rows = (
+        session.query(IngestionRunItem)
+        .filter(
+            IngestionRunItem.stage == "game_rotation",
+            IngestionRunItem.status == "success",
+            IngestionRunItem.entity_key.in_(game_ids),
+        )
+        .order_by(IngestionRunItem.entity_key, IngestionRunItem.created_at.desc())
+        .all()
+    )
+
+    coverage_by_game: dict[str, dict[str, int]] = {}
+    for row in rows:
+        game_id = str(row.entity_key)
+        if game_id in coverage_by_game:
+            continue
+        metrics = _parse_metrics_json(row.metrics_json)
+        if not metrics:
+            continue
+
+        coverage: dict[str, int] = {}
+        for key in (
+            "expected_player_count",
+            "historical_player_count",
+            "mapped_player_count",
+            "covered_player_count",
+            "zero_window_player_count",
+        ):
+            coerced = _coerce_int(metrics.get(key))
+            if coerced is not None:
+                coverage[key] = coerced
+
+        if coverage:
+            coverage_by_game[game_id] = coverage
+
+    return coverage_by_game
+
+
+def rotation_missing_player_count(
+    historical_row: dict[str, Any],
+    rotation_player_count: int,
+    coverage_metrics: dict[str, int] | None = None,
+) -> int:
+    expected_players = _coerce_int(historical_row.get("expected_rotation_players"))
+    if expected_players is None or expected_players <= 0:
+        expected_players = max(_coerce_int(historical_row.get("historical_players")) or 0, 0)
+
+    covered_players = max(int(rotation_player_count or 0), 0)
+    if coverage_metrics:
+        covered_players = max(
+            covered_players,
+            max(_coerce_int(coverage_metrics.get("mapped_player_count")) or 0, 0),
+            max(_coerce_int(coverage_metrics.get("covered_player_count")) or 0, 0),
+        )
+
+    return max(expected_players - covered_players, 0)
 
 
 def _load_rotation_run_history(session, game_ids: set[str]) -> dict[str, dict[str, Any]]:
@@ -312,8 +410,11 @@ def select_rotation_sync_batch(
     batch_size: int,
     specific_game_ids: list[str] | None = None,
     force_retry: bool = False,
+    include_partial_success: bool = False,
+    exclude_game_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     specific_game_id_set = {str(game_id) for game_id in specific_game_ids} if specific_game_ids is not None else None
+    excluded_game_id_set = {str(game_id) for game_id in exclude_game_ids} if exclude_game_ids is not None else set()
     now = _utcnow()
 
     with session_scope() as session:
@@ -324,28 +425,40 @@ def select_rotation_sync_batch(
                 "selected_game_ids": [],
                 "pending_games_selected": 0,
                 "retry_games_selected": 0,
+                "partial_success_games_selected": 0,
                 "skipped_cooldown_games": 0,
                 "quarantined_games": 0,
             }
 
         rotation_counts = _rotation_player_counts(session, game_ids)
         existing_states = _load_existing_states(session, game_ids)
+        success_coverage = load_rotation_success_coverage(session, game_ids)
 
         retry_candidates: list[tuple[datetime, str]] = []
         pending_candidates: list[tuple[int, str]] = []
+        partial_success_candidates: list[tuple[int, datetime, str]] = []
         skipped_cooldown_games = 0
         quarantined_games = 0
 
         for game_id, row in historical_games.items():
+            if excluded_game_id_set and game_id in excluded_game_id_set:
+                continue
+
             state = existing_states.get(game_id)
             if state is None:
                 continue
 
-            missing_players = max(int(row["historical_players"]) - rotation_counts.get(game_id, 0), 0)
+            missing_players = rotation_missing_player_count(
+                row,
+                rotation_counts.get(game_id, 0),
+                success_coverage.get(game_id),
+            )
             if missing_players <= 0:
                 continue
 
             if state.status == ROTATION_SYNC_STATUS_SUCCESS:
+                if include_partial_success:
+                    partial_success_candidates.append((-missing_players, state.last_succeeded_at or datetime.min, game_id))
                 continue
             if state.status == ROTATION_SYNC_STATUS_QUARANTINED:
                 if force_retry and specific_game_id_set is not None and game_id in specific_game_id_set:
@@ -367,15 +480,22 @@ def select_rotation_sync_batch(
 
         retry_candidates.sort(key=lambda item: (item[0], item[1]))
         pending_candidates.sort(key=lambda item: (item[0], item[1]))
+        partial_success_candidates.sort(key=lambda item: (item[0], item[1], item[2]))
 
         retry_limit = batch_size if force_retry and specific_game_id_set is not None else min(batch_size, ROTATION_SYNC_MAX_RETRY_GAMES_PER_BATCH)
         selected_retry = [game_id for _, game_id in retry_candidates[:retry_limit]]
-        selected_pending = [game_id for _, game_id in pending_candidates[: max(batch_size - len(selected_retry), 0)]]
+        remaining_slots = max(batch_size - len(selected_retry), 0)
+        selected_pending = [game_id for _, game_id in pending_candidates[:remaining_slots]]
+        remaining_slots = max(remaining_slots - len(selected_pending), 0)
+        selected_partial_success = [
+            game_id for _, _, game_id in partial_success_candidates[:remaining_slots]
+        ]
 
         return {
-            "selected_game_ids": selected_retry + selected_pending,
+            "selected_game_ids": selected_retry + selected_pending + selected_partial_success,
             "pending_games_selected": len(selected_pending),
             "retry_games_selected": len(selected_retry),
+            "partial_success_games_selected": len(selected_partial_success),
             "skipped_cooldown_games": skipped_cooldown_games,
             "quarantined_games": quarantined_games,
         }

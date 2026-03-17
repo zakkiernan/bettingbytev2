@@ -120,6 +120,11 @@ class PregamePointsProjection:
                 "opponent_def_rating": self.features.opponent_def_rating,
                 "opponent_pace": self.features.opponent_pace,
                 "team_pace": self.features.team_pace,
+                "pregame_context_attached": self.features.pregame_context_attached,
+                "official_injury_attached": self.features.official_injury_attached,
+                "context_source": self.features.context_source,
+                "pregame_context_confidence": self.features.pregame_context_confidence,
+                "official_injury_status": self.features.official_injury_status,
             },
         }
         return {

@@ -7,7 +7,7 @@ from math import sqrt
 from statistics import mean, median
 from typing import Any
 
-from analytics.features_opportunity import PregameFeatureRequest, _build_defense_context, build_pregame_feature_seed
+from analytics.features_opportunity import PregameFeatureRequest, _build_absence_impact_index, _build_defense_context, build_pregame_feature_seed
 from analytics.features_pregame import build_pregame_points_features_from_seed
 from analytics.injury_report_loader import build_official_injury_report_index
 from analytics.opportunity_model import project_pregame_opportunity
@@ -15,6 +15,7 @@ from analytics.pregame_context_loader import build_pregame_context_index, load_p
 from analytics.pregame_model import project_pregame_points
 from database.db import session_scope
 from database.models import (
+    AbsenceImpactSummary,
     Game,
     HistoricalAdvancedLog,
     HistoricalGameLog,
@@ -42,7 +43,21 @@ class PregamePointsBacktestRow:
     abs_error: float
     line: float | None
     line_available: bool
+    over_probability: float
+    under_probability: float
+    edge_over: float
+    edge_under: float
+    confidence: float
+    recommended_side: str | None
+    line_delta: float | None
+    recommended_outcome: str | None
     pregame_context_attached: bool
+    official_injury_attached: bool
+    context_source: str
+    absence_impact_sample_confidence: float | None
+    absence_impact_source_count: float | None
+    absence_impact_minutes_bonus: float
+    absence_impact_usage_bonus: float
     recent_form_adjustment: float
     minutes_adjustment: float
     usage_adjustment: float
@@ -65,6 +80,35 @@ class PregamePointsErrorSlice:
 
 
 @dataclass(slots=True)
+class PregamePointsDecisionBucket:
+    label: str
+    sample_size: int
+    win_count: int
+    loss_count: int
+    push_count: int
+    hit_rate: float
+    avg_edge: float
+    avg_confidence: float
+
+
+@dataclass(slots=True)
+class PregamePointsDecisionSummary:
+    recommendation_count: int
+    recommendation_rate: float
+    win_count: int
+    loss_count: int
+    push_count: int
+    graded_count: int
+    hit_rate: float
+    avg_edge: float
+    avg_confidence: float
+    over_recommendation_count: int
+    under_recommendation_count: int
+    confidence_buckets: list[PregamePointsDecisionBucket]
+    edge_buckets: list[PregamePointsDecisionBucket]
+
+
+@dataclass(slots=True)
 class PregamePointsBacktestSummary:
     sample_size: int
     line_available_count: int
@@ -73,6 +117,10 @@ class PregamePointsBacktestSummary:
     line_missing_pct: float
     pregame_context_attached_count: int
     pregame_context_attached_pct: float
+    official_injury_attached_count: int
+    official_injury_attached_pct: float
+    injury_only_context_count: int
+    injury_only_context_pct: float
     mae: float
     rmse: float
     bias: float
@@ -82,6 +130,7 @@ class PregamePointsBacktestSummary:
     projection_error: PregamePointsErrorSlice
     line_available_error: PregamePointsErrorSlice
     line_missing_error: PregamePointsErrorSlice
+    decision_summary: PregamePointsDecisionSummary
     average_absolute_recent_form_adjustment: float
     average_absolute_minutes_adjustment: float
     average_absolute_usage_adjustment: float
@@ -144,6 +193,12 @@ class PregameOpportunityBacktestRow:
     late_scratch_risk: float | None
     pregame_context_confidence: float | None
     pregame_context_attached: bool
+    official_injury_attached: bool
+    context_source: str
+    absence_impact_sample_confidence: float | None
+    absence_impact_source_count: float | None
+    absence_impact_minutes_bonus: float
+    absence_impact_usage_bonus: float
     breakdown: dict[str, float]
 
 
@@ -156,6 +211,10 @@ class PregameOpportunityBacktestSummary:
     rotation_target_pct: float
     pregame_context_attached_count: int
     pregame_context_attached_pct: float
+    official_injury_attached_count: int
+    official_injury_attached_pct: float
+    injury_only_context_count: int
+    injury_only_context_pct: float
     minutes_mae: float
     minutes_rmse: float
     minutes_bias: float
@@ -182,6 +241,22 @@ class PregameOpportunityBacktestResult:
     rows: list[PregameOpportunityBacktestRow]
 
 
+@dataclass(slots=True)
+class ContextAttachmentCoverage:
+    pregame_context_attached_count: int
+    official_injury_attached_count: int
+    injury_only_context_count: int
+
+
+@dataclass(slots=True)
+class AbsenceImpactConfidenceBucketSummary:
+    label: str
+    sample_size: int
+    mae: float
+    avg_minutes_bonus: float
+    avg_usage_bonus: float
+
+
 
 def _season_from_game_date(game_date: datetime) -> str:
     if game_date.month >= 10:
@@ -195,6 +270,146 @@ def _round(value: float) -> float:
 
 
 
+def _summarize_context_attachment(rows: list[Any]) -> ContextAttachmentCoverage:
+    pregame_context_attached_count = 0
+    official_injury_attached_count = 0
+    injury_only_context_count = 0
+    for row in rows:
+        has_pregame_context = bool(getattr(row, "pregame_context_attached", False))
+        has_official_injury = bool(getattr(row, "official_injury_attached", False))
+        if has_pregame_context:
+            pregame_context_attached_count += 1
+        if has_official_injury:
+            official_injury_attached_count += 1
+        if has_official_injury and not has_pregame_context:
+            injury_only_context_count += 1
+    return ContextAttachmentCoverage(
+        pregame_context_attached_count=pregame_context_attached_count,
+        official_injury_attached_count=official_injury_attached_count,
+        injury_only_context_count=injury_only_context_count,
+    )
+
+
+
+def _absence_impact_confidence_label(value: float | None) -> str:
+    if value is None:
+        return "unknown"
+    if value < 0.5:
+        return "0.35-0.49"
+    if value < 0.65:
+        return "0.50-0.64"
+    return "0.65+"
+
+
+
+def _summarize_absence_impact_confidence_buckets(rows: list[Any], *, error_attr: str) -> list[AbsenceImpactConfidenceBucketSummary]:
+    ordered_labels = ("0.35-0.49", "0.50-0.64", "0.65+", "unknown")
+    bucket_rows: dict[str, list[Any]] = {label: [] for label in ordered_labels}
+    for row in rows:
+        bucket_rows[_absence_impact_confidence_label(getattr(row, "absence_impact_sample_confidence", None))].append(row)
+
+    summaries: list[AbsenceImpactConfidenceBucketSummary] = []
+    for label in ordered_labels:
+        candidates = bucket_rows[label]
+        error_values = [float(getattr(row, error_attr)) for row in candidates if getattr(row, error_attr) is not None]
+        summaries.append(
+            AbsenceImpactConfidenceBucketSummary(
+                label=label,
+                sample_size=len(candidates),
+                mae=_round(mean(abs(value) for value in error_values)) if error_values else 0.0,
+                avg_minutes_bonus=_round(mean(float(row.absence_impact_minutes_bonus) for row in candidates)) if candidates else 0.0,
+                avg_usage_bonus=_round(mean(float(row.absence_impact_usage_bonus) for row in candidates)) if candidates else 0.0,
+            )
+        )
+    return summaries
+
+
+
+def summarize_points_absence_impact(rows: list[PregamePointsBacktestRow]) -> dict[str, Any]:
+    affected_rows = [row for row in rows if row.absence_impact_minutes_bonus > 0.0 or row.absence_impact_usage_bonus > 0.0]
+    minutes_affected_rows = [row for row in affected_rows if row.absence_impact_minutes_bonus > 0.0]
+    usage_only_rows = [row for row in affected_rows if row.absence_impact_minutes_bonus <= 0.0 and row.absence_impact_usage_bonus > 0.0]
+    unaffected_rows = [row for row in rows if row.absence_impact_minutes_bonus <= 0.0 and row.absence_impact_usage_bonus <= 0.0]
+
+    return {
+        "affected_count": len(affected_rows),
+        "affected_pct": _round(len(affected_rows) / len(rows)) if rows else 0.0,
+        "minutes_affected_count": len(minutes_affected_rows),
+        "minutes_affected_pct": _round(len(minutes_affected_rows) / len(rows)) if rows else 0.0,
+        "usage_only_count": len(usage_only_rows),
+        "usage_only_pct": _round(len(usage_only_rows) / len(rows)) if rows else 0.0,
+        "affected_mae": _round(mean(row.abs_error for row in affected_rows)) if affected_rows else 0.0,
+        "minutes_affected_mae": _round(mean(row.abs_error for row in minutes_affected_rows)) if minutes_affected_rows else 0.0,
+        "usage_only_mae": _round(mean(row.abs_error for row in usage_only_rows)) if usage_only_rows else 0.0,
+        "unaffected_mae": _round(mean(row.abs_error for row in unaffected_rows)) if unaffected_rows else 0.0,
+        "confidence_buckets": _summarize_absence_impact_confidence_buckets(affected_rows, error_attr="error"),
+        "largest_affected_misses": [
+            {
+                "game_id": row.game_id,
+                "game_date": row.game_date.isoformat(),
+                "player_name": row.player_name,
+                "team_abbreviation": row.team_abbreviation,
+                "opponent_abbreviation": row.opponent_abbreviation,
+                "projected_points": row.projected_points,
+                "actual_points": row.actual_points,
+                "error": row.error,
+                "abs_error": row.abs_error,
+                "absence_impact_sample_confidence": row.absence_impact_sample_confidence,
+                "absence_impact_source_count": row.absence_impact_source_count,
+                "absence_impact_minutes_bonus": row.absence_impact_minutes_bonus,
+                "absence_impact_usage_bonus": row.absence_impact_usage_bonus,
+            }
+            for row in sorted(affected_rows, key=lambda item: item.abs_error, reverse=True)[:10]
+        ],
+    }
+
+
+
+def summarize_opportunity_absence_impact(rows: list[PregameOpportunityBacktestRow]) -> dict[str, Any]:
+    affected_rows = [row for row in rows if row.absence_impact_minutes_bonus > 0.0 or row.absence_impact_usage_bonus > 0.0]
+    minutes_affected_rows = [row for row in affected_rows if row.absence_impact_minutes_bonus > 0.0]
+    usage_only_rows = [row for row in affected_rows if row.absence_impact_minutes_bonus <= 0.0 and row.absence_impact_usage_bonus > 0.0]
+    unaffected_rows = [row for row in rows if row.absence_impact_minutes_bonus <= 0.0 and row.absence_impact_usage_bonus <= 0.0]
+
+    def _minutes_mae(candidates: list[PregameOpportunityBacktestRow]) -> float:
+        values = [float(row.abs_minutes_error) for row in candidates if row.abs_minutes_error is not None]
+        return _round(mean(values)) if values else 0.0
+
+    return {
+        "affected_count": len(affected_rows),
+        "affected_pct": _round(len(affected_rows) / len(rows)) if rows else 0.0,
+        "minutes_affected_count": len(minutes_affected_rows),
+        "minutes_affected_pct": _round(len(minutes_affected_rows) / len(rows)) if rows else 0.0,
+        "usage_only_count": len(usage_only_rows),
+        "usage_only_pct": _round(len(usage_only_rows) / len(rows)) if rows else 0.0,
+        "affected_minutes_mae": _minutes_mae(affected_rows),
+        "minutes_affected_minutes_mae": _minutes_mae(minutes_affected_rows),
+        "usage_only_minutes_mae": _minutes_mae(usage_only_rows),
+        "unaffected_minutes_mae": _minutes_mae(unaffected_rows),
+        "confidence_buckets": _summarize_absence_impact_confidence_buckets(affected_rows, error_attr="minutes_error"),
+        "largest_affected_minutes_misses": [
+            {
+                "game_id": row.game_id,
+                "game_date": row.game_date.isoformat(),
+                "player_name": row.player_name,
+                "team_abbreviation": row.team_abbreviation,
+                "opponent_abbreviation": row.opponent_abbreviation,
+                "expected_minutes": row.expected_minutes,
+                "actual_minutes": row.actual_minutes,
+                "minutes_error": row.minutes_error,
+                "abs_minutes_error": row.abs_minutes_error,
+                "context_source": row.context_source,
+                "absence_impact_sample_confidence": row.absence_impact_sample_confidence,
+                "absence_impact_source_count": row.absence_impact_source_count,
+                "absence_impact_minutes_bonus": row.absence_impact_minutes_bonus,
+                "absence_impact_usage_bonus": row.absence_impact_usage_bonus,
+            }
+            for row in sorted(affected_rows, key=lambda item: float(item.abs_minutes_error or 0.0), reverse=True)[:10]
+        ],
+    }
+
+
+
 def _empty_points_error_slice() -> PregamePointsErrorSlice:
     return PregamePointsErrorSlice(
         sample_size=0,
@@ -204,6 +419,113 @@ def _empty_points_error_slice() -> PregamePointsErrorSlice:
         median_abs_error=0.0,
         within_two_points_pct=0.0,
         within_four_points_pct=0.0,
+    )
+
+
+
+def _empty_points_decision_summary() -> PregamePointsDecisionSummary:
+    return PregamePointsDecisionSummary(
+        recommendation_count=0,
+        recommendation_rate=0.0,
+        win_count=0,
+        loss_count=0,
+        push_count=0,
+        graded_count=0,
+        hit_rate=0.0,
+        avg_edge=0.0,
+        avg_confidence=0.0,
+        over_recommendation_count=0,
+        under_recommendation_count=0,
+        confidence_buckets=[],
+        edge_buckets=[],
+    )
+
+
+
+def _grade_recommended_pick(row: PregamePointsBacktestRow) -> str | None:
+    if not row.line_available or row.recommended_side is None or row.line is None:
+        return None
+    if row.actual_points > row.line:
+        actual_side = "OVER"
+    elif row.actual_points < row.line:
+        actual_side = "UNDER"
+    else:
+        return "push"
+    return "win" if row.recommended_side == actual_side else "loss"
+
+
+
+def _bucket_label(value: float, bins: tuple[float, ...], *, percent: bool = False) -> str:
+    for idx in range(len(bins) - 1):
+        lower = bins[idx]
+        upper = bins[idx + 1]
+        if lower <= value < upper:
+            if percent:
+                return f"{int(lower * 100)}-{int(upper * 100)}%"
+            if upper >= 999:
+                return f">={lower:.1f}"
+            return f"{lower:.1f}-{upper:.1f}"
+    return f">={bins[-2]:.1f}"
+
+
+
+def _summarize_decision_bucket(label: str, rows: list[PregamePointsBacktestRow]) -> PregamePointsDecisionBucket:
+    wins = sum(1 for row in rows if row.recommended_outcome == "win")
+    losses = sum(1 for row in rows if row.recommended_outcome == "loss")
+    pushes = sum(1 for row in rows if row.recommended_outcome == "push")
+    graded = wins + losses
+    return PregamePointsDecisionBucket(
+        label=label,
+        sample_size=len(rows),
+        win_count=wins,
+        loss_count=losses,
+        push_count=pushes,
+        hit_rate=_round(wins / graded) if graded else 0.0,
+        avg_edge=_round(mean(abs(row.edge_over) for row in rows)) if rows else 0.0,
+        avg_confidence=_round(mean(row.confidence for row in rows)) if rows else 0.0,
+    )
+
+
+
+def _summarize_points_decisions(rows: list[PregamePointsBacktestRow]) -> PregamePointsDecisionSummary:
+    recommended_rows = [row for row in rows if row.recommended_side is not None and row.line_available]
+    if not recommended_rows:
+        return _empty_points_decision_summary()
+
+    confidence_bins = (0.0, 0.50, 0.60, 0.70, 0.80, 1.01)
+    edge_bins = (0.0, 1.0, 2.0, 3.0, 5.0, 999.0)
+
+    confidence_groups: dict[str, list[PregamePointsBacktestRow]] = defaultdict(list)
+    edge_groups: dict[str, list[PregamePointsBacktestRow]] = defaultdict(list)
+    for row in recommended_rows:
+        confidence_groups[_bucket_label(row.confidence, confidence_bins, percent=True)].append(row)
+        edge_groups[_bucket_label(abs(row.edge_over), edge_bins)].append(row)
+
+    wins = sum(1 for row in recommended_rows if row.recommended_outcome == "win")
+    losses = sum(1 for row in recommended_rows if row.recommended_outcome == "loss")
+    pushes = sum(1 for row in recommended_rows if row.recommended_outcome == "push")
+    graded = wins + losses
+
+    return PregamePointsDecisionSummary(
+        recommendation_count=len(recommended_rows),
+        recommendation_rate=_round(len(recommended_rows) / len(rows)) if rows else 0.0,
+        win_count=wins,
+        loss_count=losses,
+        push_count=pushes,
+        graded_count=graded,
+        hit_rate=_round(wins / graded) if graded else 0.0,
+        avg_edge=_round(mean(abs(row.edge_over) for row in recommended_rows)),
+        avg_confidence=_round(mean(row.confidence for row in recommended_rows)),
+        over_recommendation_count=sum(1 for row in recommended_rows if row.recommended_side == "OVER"),
+        under_recommendation_count=sum(1 for row in recommended_rows if row.recommended_side == "UNDER"),
+        confidence_buckets=[
+            _summarize_decision_bucket(label, bucket_rows)
+            for label, bucket_rows in confidence_groups.items()
+        ],
+        edge_buckets=[
+            _summarize_decision_bucket(label, bucket_rows)
+            for label, bucket_rows in edge_groups.items()
+        ],
     )
 
 
@@ -393,6 +715,7 @@ def backtest_pregame_points(
         games = session.query(Game).all()
         teams = session.query(Team).all()
         team_defense_rows = session.query(TeamDefensiveStat).all()
+        absence_impact_rows = session.query(AbsenceImpactSummary).all()
         odds_rows = (
             session.query(OddsSnapshot)
             .filter(OddsSnapshot.market_phase == "pregame", OddsSnapshot.stat_type == "points")
@@ -438,6 +761,7 @@ def backtest_pregame_points(
     injury_rows_by_report_id, injury_report_refs_by_game_date = _build_historical_injury_report_indexes(injury_entries)
     injury_index_cache: dict[int, Any] = {}
     team_role_prior_cache: dict[tuple[str, str], Any] = {}
+    absence_impact_index = _build_absence_impact_index(absence_impact_rows)
 
     rows: list[PregamePointsBacktestRow] = []
     with session_scope() as session:
@@ -484,6 +808,7 @@ def backtest_pregame_points(
                 league_avg_opponent_points_by_season=league_avg_opponent_points_by_season,
                 pregame_context_index=pregame_context_index,
                 official_injury_index=injury_index,
+                absence_impact_index=absence_impact_index,
                 team_role_prior_cache=team_role_prior_cache,
                 logs_by_player=logs_by_player,
                 advanced_by_player_game=advanced_by_player_game,
@@ -495,6 +820,7 @@ def backtest_pregame_points(
                 continue
 
             features = build_pregame_points_features_from_seed(seed)
+            opportunity_projection = project_pregame_opportunity(features)
             projection = project_pregame_points(features)
             if projection.breakdown.expected_minutes < min_expected_minutes:
                 continue
@@ -502,33 +828,50 @@ def backtest_pregame_points(
             actual_points = float(target.points or 0.0)
             error = projection.projected_value - actual_points
             breakdown = projection.breakdown.to_dict()
-            rows.append(
-                PregamePointsBacktestRow(
-                    game_id=target.game_id,
-                    game_date=target.game_date,
-                    player_id=target.player_id,
-                    player_name=target.player_name,
-                    team_abbreviation=target.team,
-                    opponent_abbreviation=target.opponent,
-                    projected_points=projection.projected_value,
-                    actual_points=actual_points,
-                    actual_minutes=float(target.minutes) if target.minutes is not None else None,
-                    expected_minutes=float(breakdown.get("expected_minutes", 0.0)) if breakdown.get("expected_minutes") is not None else None,
-                    error=_round(error),
-                    abs_error=_round(abs(error)),
-                    line=float(odds_row.line) if odds_row is not None else None,
-                    line_available=odds_row is not None,
-                    pregame_context_attached=bool(features.pregame_context_attached),
-                    recent_form_adjustment=float(breakdown.get("recent_form_adjustment", 0.0)),
-                    minutes_adjustment=float(breakdown.get("minutes_adjustment", 0.0)),
-                    usage_adjustment=float(breakdown.get("usage_adjustment", 0.0)),
-                    efficiency_adjustment=float(breakdown.get("efficiency_adjustment", 0.0)),
-                    opponent_adjustment=float(breakdown.get("opponent_adjustment", 0.0)),
-                    pace_adjustment=float(breakdown.get("pace_adjustment", 0.0)),
-                    context_adjustment=float(breakdown.get("context_adjustment", 0.0)),
-                    breakdown=breakdown,
-                )
+            opportunity_breakdown = opportunity_projection.breakdown
+            line_value = float(odds_row.line) if odds_row is not None else None
+            line_delta = actual_points - line_value if line_value is not None else None
+            row = PregamePointsBacktestRow(
+                game_id=target.game_id,
+                game_date=target.game_date,
+                player_id=target.player_id,
+                player_name=target.player_name,
+                team_abbreviation=target.team,
+                opponent_abbreviation=target.opponent,
+                projected_points=projection.projected_value,
+                actual_points=actual_points,
+                actual_minutes=float(target.minutes) if target.minutes is not None else None,
+                expected_minutes=float(breakdown.get("expected_minutes", 0.0)) if breakdown.get("expected_minutes") is not None else None,
+                error=_round(error),
+                abs_error=_round(abs(error)),
+                line=line_value,
+                line_available=odds_row is not None,
+                over_probability=float(projection.over_probability),
+                under_probability=float(projection.under_probability),
+                edge_over=float(projection.edge_over),
+                edge_under=float(projection.edge_under),
+                confidence=float(projection.confidence),
+                recommended_side=projection.recommended_side,
+                line_delta=_round(line_delta) if line_delta is not None else None,
+                recommended_outcome=None,
+                pregame_context_attached=bool(features.pregame_context_attached),
+                official_injury_attached=bool(features.official_injury_attached),
+                context_source=features.context_source or "none",
+                absence_impact_sample_confidence=features.absence_impact_sample_confidence,
+                absence_impact_source_count=features.absence_impact_source_count,
+                absence_impact_minutes_bonus=float(opportunity_breakdown.absence_impact_minutes_bonus),
+                absence_impact_usage_bonus=float(opportunity_breakdown.absence_impact_usage_bonus),
+                recent_form_adjustment=float(breakdown.get("recent_form_adjustment", 0.0)),
+                minutes_adjustment=float(breakdown.get("minutes_adjustment", 0.0)),
+                usage_adjustment=float(breakdown.get("usage_adjustment", 0.0)),
+                efficiency_adjustment=float(breakdown.get("efficiency_adjustment", 0.0)),
+                opponent_adjustment=float(breakdown.get("opponent_adjustment", 0.0)),
+                pace_adjustment=float(breakdown.get("pace_adjustment", 0.0)),
+                context_adjustment=float(breakdown.get("context_adjustment", 0.0)),
+                breakdown=breakdown,
             )
+            row.recommended_outcome = _grade_recommended_pick(row)
+            rows.append(row)
             if limit is not None and len(rows) >= limit:
                 break
 
@@ -543,6 +886,10 @@ def backtest_pregame_points(
                 line_missing_pct=0.0,
                 pregame_context_attached_count=0,
                 pregame_context_attached_pct=0.0,
+                official_injury_attached_count=0,
+                official_injury_attached_pct=0.0,
+                injury_only_context_count=0,
+                injury_only_context_pct=0.0,
                 mae=0.0,
                 rmse=0.0,
                 bias=0.0,
@@ -552,6 +899,7 @@ def backtest_pregame_points(
                 projection_error=_empty_points_error_slice(),
                 line_available_error=_empty_points_error_slice(),
                 line_missing_error=_empty_points_error_slice(),
+                decision_summary=_empty_points_decision_summary(),
                 average_absolute_recent_form_adjustment=0.0,
                 average_absolute_minutes_adjustment=0.0,
                 average_absolute_usage_adjustment=0.0,
@@ -570,9 +918,13 @@ def backtest_pregame_points(
     line_missing_rows = [row for row in rows if not row.line_available]
     line_available_error = _summarize_points_errors(line_available_rows)
     line_missing_error = _summarize_points_errors(line_missing_rows)
+    decision_summary = _summarize_points_decisions(rows)
     line_available_count = len(line_available_rows)
     line_missing_count = len(line_missing_rows)
-    pregame_context_attached_count = sum(1 for row in rows if row.pregame_context_attached)
+    context_coverage = _summarize_context_attachment(rows)
+    pregame_context_attached_count = context_coverage.pregame_context_attached_count
+    official_injury_attached_count = context_coverage.official_injury_attached_count
+    injury_only_context_count = context_coverage.injury_only_context_count
 
     def average_absolute_component(name: str) -> float:
         return _round(mean(abs(float(getattr(row, name))) for row in rows))
@@ -589,6 +941,8 @@ def backtest_pregame_points(
             "actual_minutes": row.actual_minutes,
             "expected_minutes": row.expected_minutes,
             "pregame_context_attached": row.pregame_context_attached,
+            "official_injury_attached": row.official_injury_attached,
+            "context_source": row.context_source,
             "line_available": row.line_available,
             "error": row.error,
             "abs_error": row.abs_error,
@@ -600,6 +954,8 @@ def backtest_pregame_points(
     line_available_pct = line_available_count / len(rows)
     line_missing_pct = line_missing_count / len(rows)
     pregame_context_attached_pct = pregame_context_attached_count / len(rows)
+    official_injury_attached_pct = official_injury_attached_count / len(rows)
+    injury_only_context_pct = injury_only_context_count / len(rows)
     if line_available_pct == 0:
         notes.append("No historical pregame points lines were available in the local database, so this backtest measures projection accuracy only.")
     elif line_available_pct < 0.10:
@@ -610,6 +966,8 @@ def backtest_pregame_points(
         notes.append("No persisted pregame context snapshots attached to this window, so context-aware validation is limited to injury and rotation signals only.")
     elif pregame_context_attached_pct < 0.9:
         notes.append("Persisted pregame context only covers part of this backtest window, so context-aware metrics reflect a mixed sample.")
+    if injury_only_context_count > 0:
+        notes.append("Some rows relied on official injury fallback without persisted pregame context, so lineup-aware validation still reflects a mixed context sample.")
     notes.append(f"Backtest excludes players whose projected pregame role stayed below {min_expected_minutes:.1f} expected minutes.")
 
     summary = PregamePointsBacktestSummary(
@@ -620,6 +978,10 @@ def backtest_pregame_points(
         line_missing_pct=_round(line_missing_pct),
         pregame_context_attached_count=pregame_context_attached_count,
         pregame_context_attached_pct=_round(pregame_context_attached_pct),
+        official_injury_attached_count=official_injury_attached_count,
+        official_injury_attached_pct=_round(official_injury_attached_pct),
+        injury_only_context_count=injury_only_context_count,
+        injury_only_context_pct=_round(injury_only_context_pct),
         mae=projection_error.mae,
         rmse=projection_error.rmse,
         bias=projection_error.bias,
@@ -629,6 +991,7 @@ def backtest_pregame_points(
         projection_error=projection_error,
         line_available_error=line_available_error,
         line_missing_error=line_missing_error,
+        decision_summary=decision_summary,
         average_absolute_recent_form_adjustment=average_absolute_component("recent_form_adjustment"),
         average_absolute_minutes_adjustment=average_absolute_component("minutes_adjustment"),
         average_absolute_usage_adjustment=average_absolute_component("usage_adjustment"),
@@ -671,6 +1034,7 @@ def backtest_pregame_opportunity(
         games = session.query(Game).all()
         teams = session.query(Team).all()
         team_defense_rows = session.query(TeamDefensiveStat).all()
+        absence_impact_rows = session.query(AbsenceImpactSummary).all()
         odds_rows = (
             session.query(OddsSnapshot)
             .filter(OddsSnapshot.market_phase == "pregame", OddsSnapshot.stat_type == "points")
@@ -716,6 +1080,7 @@ def backtest_pregame_opportunity(
     injury_rows_by_report_id, injury_report_refs_by_game_date = _build_historical_injury_report_indexes(injury_entries)
     injury_index_cache: dict[int, Any] = {}
     team_role_prior_cache: dict[tuple[str, str], Any] = {}
+    absence_impact_index = _build_absence_impact_index(absence_impact_rows)
 
     rows: list[PregameOpportunityBacktestRow] = []
     with session_scope() as session:
@@ -762,6 +1127,7 @@ def backtest_pregame_opportunity(
                 league_avg_opponent_points_by_season=league_avg_opponent_points_by_season,
                 pregame_context_index=pregame_context_index,
                 official_injury_index=injury_index,
+                absence_impact_index=absence_impact_index,
                 team_role_prior_cache=team_role_prior_cache,
                 logs_by_player=logs_by_player,
                 advanced_by_player_game=advanced_by_player_game,
@@ -840,6 +1206,12 @@ def backtest_pregame_opportunity(
                     late_scratch_risk=feature.late_scratch_risk,
                     pregame_context_confidence=feature.pregame_context_confidence,
                     pregame_context_attached=bool(feature.pregame_context_attached),
+                    official_injury_attached=bool(feature.official_injury_attached),
+                    context_source=feature.context_source or "none",
+                    absence_impact_sample_confidence=feature.absence_impact_sample_confidence,
+                    absence_impact_source_count=feature.absence_impact_source_count,
+                    absence_impact_minutes_bonus=float(projection.breakdown.absence_impact_minutes_bonus),
+                    absence_impact_usage_bonus=float(projection.breakdown.absence_impact_usage_bonus),
                     breakdown=breakdown,
                 )
             )
@@ -857,6 +1229,10 @@ def backtest_pregame_opportunity(
                 rotation_target_pct=0.0,
                 pregame_context_attached_count=0,
                 pregame_context_attached_pct=0.0,
+                official_injury_attached_count=0,
+                official_injury_attached_pct=0.0,
+                injury_only_context_count=0,
+                injury_only_context_pct=0.0,
                 minutes_mae=0.0,
                 minutes_rmse=0.0,
                 minutes_bias=0.0,
@@ -896,7 +1272,10 @@ def backtest_pregame_opportunity(
         or row.actual_passes is not None
     )
     rotation_target_count = sum(1 for row in rows if row.actual_started is not None or row.actual_closed is not None)
-    pregame_context_attached_count = sum(1 for row in rows if row.pregame_context_attached)
+    context_coverage = _summarize_context_attachment(rows)
+    pregame_context_attached_count = context_coverage.pregame_context_attached_count
+    official_injury_attached_count = context_coverage.official_injury_attached_count
+    injury_only_context_count = context_coverage.injury_only_context_count
     official_injury_player_match_count = sum(1 for row in rows if row.official_injury_status is not None)
     official_injury_team_context_count = sum(1 for row in rows if row.official_teammate_out_count is not None)
     official_injury_risk_count = sum(
@@ -916,6 +1295,8 @@ def backtest_pregame_opportunity(
             "expected_minutes": row.expected_minutes,
             "actual_minutes": row.actual_minutes,
             "pregame_context_attached": row.pregame_context_attached,
+            "official_injury_attached": row.official_injury_attached,
+            "context_source": row.context_source,
             "minutes_error": row.minutes_error,
             "abs_minutes_error": row.abs_minutes_error,
             "expected_usage_pct": row.expected_usage_pct,
@@ -950,6 +1331,8 @@ def backtest_pregame_opportunity(
         notes.append("No persisted pregame context snapshots attached to this opportunity window, so context-aware role validation is limited.")
     elif pregame_context_attached_count / len(rows) < 0.9:
         notes.append("Persisted pregame context only covers part of this opportunity backtest window, so context-aware opportunity metrics reflect a mixed sample.")
+    if injury_only_context_count > 0:
+        notes.append("Some opportunity rows relied on official injury fallback without persisted pregame context, so lineup-aware role validation still reflects a mixed context sample.")
     if official_injury_team_context_count == 0:
         notes.append("No historical official injury context attached to the opportunity backtest rows, so injury-aware calibration could not be evaluated.")
     elif official_injury_team_context_count / len(rows) < 0.9:
@@ -964,6 +1347,10 @@ def backtest_pregame_opportunity(
         rotation_target_pct=_round(rotation_target_count / len(rows)),
         pregame_context_attached_count=pregame_context_attached_count,
         pregame_context_attached_pct=_round(pregame_context_attached_count / len(rows)),
+        official_injury_attached_count=official_injury_attached_count,
+        official_injury_attached_pct=_round(official_injury_attached_count / len(rows)),
+        injury_only_context_count=injury_only_context_count,
+        injury_only_context_pct=_round(injury_only_context_count / len(rows)),
         minutes_mae=_round(mean(minutes_absolute_errors)) if minutes_absolute_errors else 0.0,
         minutes_rmse=_round(sqrt(mean(error ** 2 for error in minutes_signed_errors))) if minutes_signed_errors else 0.0,
         minutes_bias=_round(mean(minutes_signed_errors)) if minutes_signed_errors else 0.0,
@@ -984,3 +1371,4 @@ def backtest_pregame_opportunity(
         notes=notes,
     )
     return PregameOpportunityBacktestResult(summary=summary, rows=rows)
+

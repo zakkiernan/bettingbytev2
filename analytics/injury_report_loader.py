@@ -57,6 +57,7 @@ def build_official_injury_report_index(rows: list[dict[str, Any]]) -> OfficialIn
     by_date_team_name: dict[tuple[str, str, str], dict[str, Any]] = {}
     team_summaries: dict[tuple[str, str], dict[str, Any]] = {}
     team_rows: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    team_seen_players: dict[tuple[str, str], set[tuple[str, str]]] = {}
 
     for row in rows:
         game_date = row.get("game_date")
@@ -74,9 +75,24 @@ def build_official_injury_report_index(rows: list[dict[str, Any]]) -> OfficialIn
             for candidate in candidate_name_keys(player_name):
                 by_date_team_name.setdefault((date_key, team_abbreviation, candidate), row)
 
-        team_rows.setdefault((date_key, team_abbreviation), []).append(row)
+        team_key = (date_key, team_abbreviation)
+        player_identity = None
+        if player_id not in (None, ""):
+            player_identity = ("id", str(player_id))
+        elif player_name:
+            player_identity = ("name", next(iter(candidate_name_keys(player_name)), player_name))
+        elif current_status:
+            player_identity = ("status", current_status)
+
+        seen_players = team_seen_players.setdefault(team_key, set())
+        is_new_team_player = player_identity not in seen_players if player_identity is not None else True
+        if player_identity is not None and is_new_team_player:
+            seen_players.add(player_identity)
+        if is_new_team_player:
+            team_rows.setdefault(team_key, []).append(row)
+
         team_summary = team_summaries.setdefault(
-            (date_key, team_abbreviation),
+            team_key,
             {
                 "game_date": game_date,
                 "team_abbreviation": team_abbreviation,
@@ -97,7 +113,7 @@ def build_official_injury_report_index(rows: list[dict[str, Any]]) -> OfficialIn
             team_summary["report_datetime_utc"] = report_dt
             team_summary["report_submitted"] = row.get("report_submitted")
 
-        if not player_name:
+        if not player_name or not is_new_team_player:
             continue
         team_summary["player_entry_count"] += 1
         if current_status in {"OUT", "SUSPENDED"}:

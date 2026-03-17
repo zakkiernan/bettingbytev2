@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -10,6 +11,7 @@ from ingestion.scheduler import start_scheduler
 log_dir = Path(__file__).resolve().parent / "logs"
 log_dir.mkdir(exist_ok=True)
 log_path = log_dir / "scheduler_runner.log"
+pid_path = log_dir / "scheduler_runner.pid"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,6 +21,7 @@ logging.basicConfig(
 
 
 def main() -> int:
+    pid_path.write_text(str(os.getpid()), encoding="utf-8")
     scheduler = start_scheduler()
     logging.getLogger(__name__).info("Scheduler runner active")
 
@@ -35,6 +38,11 @@ def main() -> int:
             scheduler.shutdown(wait=False)
         except BaseException:
             logging.getLogger(__name__).exception("Scheduler shutdown failed")
+        try:
+            if pid_path.exists() and pid_path.read_text(encoding="utf-8").strip() == str(os.getpid()):
+                pid_path.unlink()
+        except BaseException:
+            logging.getLogger(__name__).exception("Scheduler pid cleanup failed")
 
     return 0
 

@@ -4,7 +4,13 @@ import unittest
 from datetime import datetime
 from types import SimpleNamespace
 
-from analytics.features_opportunity import PregameOpportunityFeatures, _build_rotation_aggregates
+from analytics.features_opportunity import (
+    PregameOpportunityFeatures,
+    TeamPlayerRoleProfile,
+    TeamRolePrior,
+    _build_role_based_official_injury_context,
+    _build_rotation_aggregates,
+)
 from analytics.opportunity_model import PregameOpportunityModelConfig, project_pregame_opportunity
 
 
@@ -132,6 +138,10 @@ class PregameOpportunityModelTests(unittest.TestCase):
             missing_high_usage_teammates=None,
             vacated_minutes_proxy=None,
             vacated_usage_proxy=None,
+            role_replacement_minutes_proxy=None,
+            role_replacement_usage_proxy=None,
+            role_replacement_touches_proxy=None,
+            role_replacement_passes_proxy=None,
             projected_lineup_confirmed=None,
             pregame_context_confidence=None,
         ))
@@ -146,6 +156,10 @@ class PregameOpportunityModelTests(unittest.TestCase):
             missing_high_usage_teammates=1.0,
             vacated_minutes_proxy=24.0,
             vacated_usage_proxy=0.06,
+            role_replacement_minutes_proxy=18.0,
+            role_replacement_usage_proxy=0.03,
+            role_replacement_touches_proxy=20.0,
+            role_replacement_passes_proxy=10.0,
             projected_lineup_confirmed=True,
             pregame_context_confidence=0.95,
         ))
@@ -181,6 +195,83 @@ class PregameOpportunityModelTests(unittest.TestCase):
 
         self.assertAlmostEqual(team_summary_only.breakdown.expected_minutes, baseline.breakdown.expected_minutes)
         self.assertAlmostEqual(team_summary_only.breakdown.expected_usage_pct, baseline.breakdown.expected_usage_pct)
+
+    def test_official_team_role_context_lifts_fringe_minutes_without_fake_start_certainty(self):
+        baseline = project_pregame_opportunity(self.build_feature(
+            season_minutes_avg=11.0,
+            last10_minutes_avg=12.0,
+            last5_minutes_avg=10.5,
+            season_rotation_minutes_avg=11.5,
+            last10_rotation_minutes_avg=12.0,
+            last5_rotation_minutes_avg=11.0,
+            season_started_rate=0.05,
+            last10_started_rate=0.0,
+            last5_started_rate=0.0,
+            season_closed_rate=0.08,
+            last10_closed_rate=0.1,
+            last5_closed_rate=0.0,
+            season_usage_pct=0.16,
+            last10_usage_pct=0.155,
+            last5_usage_pct=0.15,
+            season_est_usage_pct=0.16,
+            last10_est_usage_pct=0.155,
+            last5_est_usage_pct=0.15,
+            season_touches=24.0,
+            last10_touches=26.0,
+            last5_touches=23.0,
+            season_passes=17.0,
+            last10_passes=18.0,
+            last5_passes=16.0,
+            pregame_context_confidence=None,
+            official_teammate_out_count=None,
+            teammate_out_count_top7=None,
+            teammate_out_count_top9=None,
+            missing_high_usage_teammates=None,
+            vacated_minutes_proxy=None,
+            vacated_usage_proxy=None,
+            context_source="none",
+        ))
+        boosted = project_pregame_opportunity(self.build_feature(
+            season_minutes_avg=11.0,
+            last10_minutes_avg=12.0,
+            last5_minutes_avg=10.5,
+            season_rotation_minutes_avg=11.5,
+            last10_rotation_minutes_avg=12.0,
+            last5_rotation_minutes_avg=11.0,
+            season_started_rate=0.05,
+            last10_started_rate=0.0,
+            last5_started_rate=0.0,
+            season_closed_rate=0.08,
+            last10_closed_rate=0.1,
+            last5_closed_rate=0.0,
+            season_usage_pct=0.16,
+            last10_usage_pct=0.155,
+            last5_usage_pct=0.15,
+            season_est_usage_pct=0.16,
+            last10_est_usage_pct=0.155,
+            last5_est_usage_pct=0.15,
+            season_touches=24.0,
+            last10_touches=26.0,
+            last5_touches=23.0,
+            season_passes=17.0,
+            last10_passes=18.0,
+            last5_passes=16.0,
+            official_teammate_out_count=6.0,
+            teammate_out_count_top7=3.0,
+            teammate_out_count_top9=5.0,
+            missing_high_usage_teammates=1.5,
+            vacated_minutes_proxy=72.0,
+            vacated_usage_proxy=0.08,
+            pregame_context_confidence=0.35,
+            official_injury_attached=True,
+            context_source="official_injury_team",
+        ))
+
+        self.assertGreater(boosted.breakdown.expected_minutes, baseline.breakdown.expected_minutes + 2.0)
+        self.assertGreater(boosted.breakdown.expected_touches, baseline.breakdown.expected_touches)
+        self.assertGreater(boosted.breakdown.expected_start_rate, baseline.breakdown.expected_start_rate)
+        self.assertLess(boosted.breakdown.expected_start_rate, 0.5)
+        self.assertGreater(boosted.breakdown.opportunity_score, baseline.breakdown.opportunity_score)
 
 
     def test_pregame_context_unavailable_player_crushes_minutes_and_confidence(self):
@@ -247,6 +338,114 @@ class PregameOpportunityModelTests(unittest.TestCase):
 
         self.assertGreater(stable.breakdown.role_stability, unstable.breakdown.role_stability)
         self.assertGreater(stable.breakdown.confidence, unstable.breakdown.confidence)
+
+    def test_role_replacement_frontcourt_context_lifts_minutes_more_than_generic_only_context(self):
+        generic = project_pregame_opportunity(
+            self.build_feature(
+                expected_start=True,
+                starter_confidence=0.85,
+                projected_available=True,
+                official_available=True,
+                teammate_out_count_top7=2.0,
+                teammate_out_count_top9=2.0,
+                vacated_minutes_proxy=20.0,
+                vacated_usage_proxy=0.03,
+                pregame_context_confidence=0.9,
+            )
+        )
+        replacement = project_pregame_opportunity(
+            self.build_feature(
+                expected_start=True,
+                starter_confidence=0.85,
+                projected_available=True,
+                official_available=True,
+                teammate_out_count_top7=2.0,
+                teammate_out_count_top9=2.0,
+                vacated_minutes_proxy=20.0,
+                vacated_usage_proxy=0.03,
+                role_replacement_minutes_proxy=24.0,
+                role_replacement_usage_proxy=0.04,
+                role_replacement_touches_proxy=12.0,
+                role_replacement_passes_proxy=4.0,
+                missing_frontcourt_rotation_piece=True,
+                pregame_context_confidence=0.9,
+            )
+        )
+
+        self.assertGreater(replacement.breakdown.expected_minutes, generic.breakdown.expected_minutes)
+        self.assertGreater(replacement.breakdown.role_replacement_minutes_bonus, 0.0)
+        self.assertGreater(replacement.breakdown.role_replacement_usage_bonus, 0.0)
+
+    def test_empirical_absence_impact_adds_gated_minutes_and_usage(self):
+        baseline = project_pregame_opportunity(self.build_feature(
+            context_source="official_injury_team",
+            pregame_context_confidence=0.35,
+            absence_impact_minutes_delta=None,
+            absence_impact_usage_delta=None,
+            absence_impact_touches_delta=None,
+            absence_impact_passes_delta=None,
+            absence_impact_sample_confidence=None,
+            absence_impact_source_count=None,
+        ))
+        boosted = project_pregame_opportunity(self.build_feature(
+            context_source="official_injury_team",
+            pregame_context_confidence=0.35,
+            absence_impact_minutes_delta=4.0,
+            absence_impact_usage_delta=0.03,
+            absence_impact_touches_delta=9.0,
+            absence_impact_passes_delta=4.0,
+            absence_impact_sample_confidence=0.6,
+            absence_impact_source_count=1.0,
+        ))
+
+        self.assertEqual(boosted.breakdown.expected_minutes, baseline.breakdown.expected_minutes)
+        self.assertGreater(boosted.breakdown.expected_usage_pct, baseline.breakdown.expected_usage_pct)
+        self.assertGreater(boosted.breakdown.expected_touches, baseline.breakdown.expected_touches)
+        self.assertEqual(boosted.breakdown.absence_impact_minutes_bonus, 0.0)
+        self.assertGreater(boosted.breakdown.absence_impact_usage_bonus, 0.0)
+
+
+class RoleReplacementFeatureTests(unittest.TestCase):
+    def test_role_based_official_injury_context_prefers_frontcourt_replacements(self):
+        prior = TeamRolePrior(
+            team_id="1",
+            team_abbreviation="BOS",
+            top7_player_ids={"big_out", "big_target", "guard_target"},
+            top9_player_ids={"big_out", "big_target", "guard_target"},
+            high_usage_player_ids={"big_out"},
+            primary_ballhandler_ids={"guard_target"},
+            frontcourt_player_ids={"big_out", "big_target"},
+            player_role_profiles={
+                "big_target": TeamPlayerRoleProfile(
+                    player_id="big_target", baseline_minutes=22.0, baseline_usage=0.18,
+                    baseline_passes=18.0, baseline_touches=34.0, baseline_rebounds=9.5,
+                    baseline_blocks=1.8, baseline_threes=0.5, start_rate=0.3, close_rate=0.4,
+                    ballhandler_score=0.20, usage_score=0.55, frontcourt_score=0.95,
+                ),
+                "guard_target": TeamPlayerRoleProfile(
+                    player_id="guard_target", baseline_minutes=22.0, baseline_usage=0.18,
+                    baseline_passes=48.0, baseline_touches=70.0, baseline_rebounds=3.0,
+                    baseline_blocks=0.2, baseline_threes=2.2, start_rate=0.3, close_rate=0.4,
+                    ballhandler_score=0.95, usage_score=0.55, frontcourt_score=0.12,
+                ),
+                "big_out": TeamPlayerRoleProfile(
+                    player_id="big_out", baseline_minutes=31.0, baseline_usage=0.27,
+                    baseline_passes=16.0, baseline_touches=42.0, baseline_rebounds=11.2,
+                    baseline_blocks=2.4, baseline_threes=1.1, start_rate=0.9, close_rate=0.8,
+                    ballhandler_score=0.18, usage_score=0.82, frontcourt_score=0.98,
+                ),
+            },
+            baseline_minutes_by_player_id={"big_out": 31.0, "big_target": 22.0, "guard_target": 22.0},
+            baseline_usage_by_player_id={"big_out": 0.27, "big_target": 0.18, "guard_target": 0.18},
+        )
+        team_rows = [{"player_id": "big_out", "current_status": "OUT"}]
+
+        big_context = _build_role_based_official_injury_context(team_rows, prior, player_id="big_target")
+        guard_context = _build_role_based_official_injury_context(team_rows, prior, player_id="guard_target")
+
+        self.assertTrue(big_context["missing_frontcourt_rotation_piece"])
+        self.assertGreater(big_context["role_replacement_minutes_proxy"], guard_context["role_replacement_minutes_proxy"])
+        self.assertGreater(big_context["role_replacement_usage_proxy"], guard_context["role_replacement_usage_proxy"])
 
 
 class RotationOpportunityFeatureTests(unittest.TestCase):

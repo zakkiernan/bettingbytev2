@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from datetime import datetime
 
@@ -173,6 +174,28 @@ class PregamePointsModelTests(unittest.TestCase):
         self.assertGreaterEqual(projection.under_probability, 0.0)
         self.assertLessEqual(projection.under_probability, 1.0)
         self.assertAlmostEqual(projection.over_probability + projection.under_probability, 1.0, places=4)
+
+
+    def test_signal_metadata_includes_context_source_details(self):
+        projection = project_pregame_points(
+            self.build_feature(
+                pregame_context_attached=False,
+                official_injury_attached=True,
+                context_source="official_injury_player",
+                pregame_context_confidence=0.55,
+                official_injury_status="QUESTIONABLE",
+            )
+        )
+
+        signal = projection.to_signal()
+        metadata = json.loads(signal["metadata_json"])
+        feature_metadata = metadata["features"]
+
+        self.assertFalse(feature_metadata["pregame_context_attached"])
+        self.assertTrue(feature_metadata["official_injury_attached"])
+        self.assertEqual(feature_metadata["context_source"], "official_injury_player")
+        self.assertAlmostEqual(feature_metadata["pregame_context_confidence"], 0.55)
+        self.assertEqual(feature_metadata["official_injury_status"], "QUESTIONABLE")
 
 
 if __name__ == "__main__":
