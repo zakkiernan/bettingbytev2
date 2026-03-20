@@ -1,27 +1,5 @@
-from __future__ import annotations
+"""Backward-compat shim - real code is in api.schemas.nba.line_movement."""
+from importlib import import_module as _import_module
+import sys as _sys
 
-from datetime import datetime
-
-from pydantic import Field
-
-from api.schemas.base import APIModel
-
-
-class LineMovementPoint(APIModel):
-    captured_at: datetime
-    line: float
-    over_odds: int
-    under_odds: int
-    market_phase: str = "pregame"
-
-
-class LineMovementResponse(APIModel):
-    signal_id: int
-    game_id: str
-    player_id: str
-    player_name: str
-    stat_type: str
-    current_line: float
-    opening_line: float | None = None
-    line_movement: float | None = None
-    snapshots: list[LineMovementPoint] = Field(default_factory=list)
+_sys.modules[__name__] = _import_module("api.schemas.nba.line_movement")

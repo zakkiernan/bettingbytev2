@@ -1,0 +1,960 @@
+{
+  "source": "pregame_context_prototype",
+  "fetched_at_utc": "2026-03-20T03:46:03.122016+00:00",
+  "sources": {
+    "nba_live_scoreboard": "https://cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json",
+    "nba_live_boxscore_template": "https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_id}.json",
+    "rotowire_lineups": "https://www.rotowire.com/basketball/nba-lineups.php"
+  },
+  "games": [
+    {
+      "game_id": "0022501015",
+      "game_time_utc": "2026-03-19T22:00:00",
+      "game_status": 2,
+      "game_status_text": "3rd Qtr             ",
+      "away_team": {
+        "team_abbr": "PHI",
+        "team_id": 1610612755
+      },
+      "home_team": {
+        "team_abbr": "SAC",
+        "team_id": 1610612758
+      },
+      "sources_present": {
+        "nba_live_boxscore": true,
+        "rotowire_lineups": true
+      },
+      "availability": [
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 1631230,
+          "player_name": "Dominick Barlow",
+          "position": "SF",
+          "status": "ACTIVE",
+          "starter_flag": true,
+          "not_playing_reason": null,
+          "not_playing_description": null,
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 1642348,
+          "player_name": "Justin Edwards",
+          "position": "PF",
+          "status": "ACTIVE",
+          "starter_flag": true,
+          "not_playing_reason": null,
+          "not_playing_description": null,
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 1641737,
+          "player_name": "Adem Bona",
+          "position": "C",
+          "status": "ACTIVE",
+          "starter_flag": true,
+          "not_playing_reason": null,
+          "not_playing_description": null,
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 1629656,
+          "player_name": "Quentin Grimes",
+          "position": "SG",
+          "status": "ACTIVE",
+          "starter_flag": true,
+          "not_playing_reason": null,
+          "not_playing_description": null,
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 1642845,
+          "player_name": "VJ Edgecombe",
+          "position": "PG",
+          "status": "ACTIVE",
+          "starter_flag": true,
+          "not_playing_reason": null,
+          "not_playing_description": null,
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 203083,
+          "player_name": "Andre Drummond",
+          "position": null,
+          "status": "ACTIVE",
+          "starter_flag": false,
+          "not_playing_reason": null,
+          "not_playing_description": null,
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 1631133,
+          "player_name": "Jabari Walker",
+          "position": null,
+          "status": "ACTIVE",
+          "starter_flag": false,
+          "not_playing_reason": null,
+          "not_playing_description": null,
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 1626166,
+          "player_name": "Cameron Payne",
+          "position": null,
+          "status": "ACTIVE",
+          "starter_flag": false,
+          "not_playing_reason": null,
+          "not_playing_description": null,
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 1630570,
+          "player_name": "Trendon Watford",
+          "position": null,
+          "status": "ACTIVE",
+          "starter_flag": false,
+          "not_playing_reason": null,
+          "not_playing_description": null,
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 200768,
+          "player_name": "Kyle Lowry",
+          "position": null,
+          "status": "ACTIVE",
+          "starter_flag": false,
+          "not_playing_reason": null,
+          "not_playing_description": null,
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 1630699,
+          "player_name": "MarJon Beauchamp",
+          "position": null,
+          "status": "ACTIVE",
+          "starter_flag": false,
+          "not_playing_reason": null,
+          "not_playing_description": null,
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 1631207,
+          "player_name": "Dalen Terry",
+          "position": null,
+          "status": "ACTIVE",
+          "starter_flag": false,
+          "not_playing_reason": null,
+          "not_playing_description": null,
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 1641780,
+          "player_name": "Johni Broome",
+          "position": null,
+          "status": "INACTIVE",
+          "starter_flag": false,
+          "not_playing_reason": "INACTIVE_INJURY",
+          "not_playing_description": "Right Knee; Surgery Recovery",
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 203954,
+          "player_name": "Joel Embiid",
+          "position": null,
+          "status": "INACTIVE",
+          "starter_flag": false,
+          "not_playing_reason": "INACTIVE_INJURY",
+          "not_playing_description": "Right Oblique; Strain",
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 202331,
+          "player_name": "Paul George",
+          "position": null,
+          "status": "INACTIVE",
+          "starter_flag": false,
+          "not_playing_reason": "INACTIVE_LEAGUE_SUSPENSION",
+          "not_playing_description": null,
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 1631213,
+          "player_name": "Tyrese Martin",
+          "position": null,
+          "status": "INACTIVE",
+          "starter_flag": false,
+          "not_playing_reason": null,
+          "not_playing_description": null,
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 1630178,
+          "player_name": "Tyrese Maxey",
+          "position": null,
+          "status": "INACTIVE",
+          "starter_flag": false,
+          "not_playing_reason": "INACTIVE_INJURY",
+          "not_playing_description": "Right Finger; Tendon Strain",
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 1626162,
+          "player_name": "Kelly Oubre Jr.",
+          "position": null,
+          "status": "INACTIVE",
+          "starter_flag": false,
+          "not_playing_reason": "INACTIVE_INJURY",
+          "not_playing_description": "Left Elbow; Sprain",
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 201942,
+          "player_name": "DeMar DeRozan",
+          "position": "SF",
+          "status": "ACTIVE",
+          "starter_flag": true,
+          "not_playing_reason": null,
+          "not_playing_description": null,
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 1630173,
+          "player_name": "Precious Achiuwa",
+          "position": "PF",
+          "status": "ACTIVE",
+          "starter_flag": true,
+          "not_playing_reason": null,
+          "not_playing_description": null,
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 1642875,
+          "player_name": "Maxime Raynaud",
+          "position": "C",
+          "status": "ACTIVE",
+          "starter_flag": true,
+          "not_playing_reason": null,
+          "not_playing_description": null,
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 1631342,
+          "player_name": "Daeqwon Plowden",
+          "position": "SG",
+          "status": "ACTIVE",
+          "starter_flag": true,
+          "not_playing_reason": null,
+          "not_playing_description": null,
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 201566,
+          "player_name": "Russell Westbrook",
+          "position": "PG",
+          "status": "ACTIVE",
+          "starter_flag": true,
+          "not_playing_reason": null,
+          "not_playing_description": null,
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 1628370,
+          "player_name": "Malik Monk",
+          "position": null,
+          "status": "ACTIVE",
+          "starter_flag": false,
+          "not_playing_reason": null,
+          "not_playing_description": null,
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 1642928,
+          "player_name": "Dylan Cardwell",
+          "position": null,
+          "status": "ACTIVE",
+          "starter_flag": false,
+          "not_playing_reason": null,
+          "not_playing_description": null,
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 1630165,
+          "player_name": "Killian Hayes",
+          "position": null,
+          "status": "ACTIVE",
+          "starter_flag": false,
+          "not_playing_reason": null,
+          "not_playing_description": null,
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 203926,
+          "player_name": "Doug McDermott",
+          "position": null,
+          "status": "ACTIVE",
+          "starter_flag": false,
+          "not_playing_reason": null,
+          "not_playing_description": null,
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 1642269,
+          "player_name": "Devin Carter",
+          "position": null,
+          "status": "ACTIVE",
+          "starter_flag": false,
+          "not_playing_reason": "DND_INJURY",
+          "not_playing_description": "Right Calf; Contusion",
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 1642363,
+          "player_name": "Nique Clifford",
+          "position": null,
+          "status": "ACTIVE",
+          "starter_flag": false,
+          "not_playing_reason": "DND_INJURY",
+          "not_playing_description": "Left Hamstring; Soreness ",
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 1631099,
+          "player_name": "Keegan Murray",
+          "position": null,
+          "status": "ACTIVE",
+          "starter_flag": false,
+          "not_playing_reason": "DND_INJURY",
+          "not_playing_description": "Left Ankle; Sprain",
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 1631116,
+          "player_name": "Patrick Baldwin Jr.",
+          "position": null,
+          "status": "INACTIVE",
+          "starter_flag": false,
+          "not_playing_reason": "INACTIVE_GLEAGUE_TWOWAY",
+          "not_playing_description": null,
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 1629234,
+          "player_name": "Drew Eubanks",
+          "position": null,
+          "status": "INACTIVE",
+          "starter_flag": false,
+          "not_playing_reason": "INACTIVE_INJURY",
+          "not_playing_description": "Left Thumb; UCL Tear Repair",
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 1629631,
+          "player_name": "De'Andre Hunter",
+          "position": null,
+          "status": "INACTIVE",
+          "starter_flag": false,
+          "not_playing_reason": "INACTIVE_INJURY",
+          "not_playing_description": "Left Eye; Retinal Repair",
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 203897,
+          "player_name": "Zach LaVine",
+          "position": null,
+          "status": "INACTIVE",
+          "starter_flag": false,
+          "not_playing_reason": "INACTIVE_INJURY",
+          "not_playing_description": "Right 5th Finger; Tendon Repair",
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 1627734,
+          "player_name": "Domantas Sabonis",
+          "position": null,
+          "status": "INACTIVE",
+          "starter_flag": false,
+          "not_playing_reason": "INACTIVE_INJURY",
+          "not_playing_description": "Left Knee; Meniscus Repair",
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 1641815,
+          "player_name": "Isaiah Stevens",
+          "position": null,
+          "status": "INACTIVE",
+          "starter_flag": false,
+          "not_playing_reason": "INACTIVE_GLEAGUE_TWOWAY",
+          "not_playing_description": null,
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        }
+      ],
+      "official_starters": [
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 1631230,
+          "player_name": "Dominick Barlow",
+          "position": "SF",
+          "starter_type": "official",
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 1642348,
+          "player_name": "Justin Edwards",
+          "position": "PF",
+          "starter_type": "official",
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 1641737,
+          "player_name": "Adem Bona",
+          "position": "C",
+          "starter_type": "official",
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 1629656,
+          "player_name": "Quentin Grimes",
+          "position": "SG",
+          "starter_type": "official",
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 1642845,
+          "player_name": "VJ Edgecombe",
+          "position": "PG",
+          "starter_type": "official",
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 201942,
+          "player_name": "DeMar DeRozan",
+          "position": "SF",
+          "starter_type": "official",
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 1630173,
+          "player_name": "Precious Achiuwa",
+          "position": "PF",
+          "starter_type": "official",
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 1642875,
+          "player_name": "Maxime Raynaud",
+          "position": "C",
+          "starter_type": "official",
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 1631342,
+          "player_name": "Daeqwon Plowden",
+          "position": "SG",
+          "starter_type": "official",
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 201566,
+          "player_name": "Russell Westbrook",
+          "position": "PG",
+          "starter_type": "official",
+          "source": "nba_live_boxscore",
+          "source_confidence": "high"
+        }
+      ],
+      "projected_starters": [
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 1642845,
+          "player_name": "VJ Edgecombe",
+          "position": "PG",
+          "lineup_confirmed": true,
+          "lineup_status": "Confirmed Lineup",
+          "play_probability_hint": 100,
+          "injury_tag": null,
+          "source": "rotowire_lineups",
+          "source_confidence": "medium"
+        },
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 1629656,
+          "player_name": "Quentin Grimes",
+          "position": "SG",
+          "lineup_confirmed": true,
+          "lineup_status": "Confirmed Lineup",
+          "play_probability_hint": 100,
+          "injury_tag": null,
+          "source": "rotowire_lineups",
+          "source_confidence": "medium"
+        },
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 1642348,
+          "player_name": "Justin Edwards",
+          "position": "SF",
+          "lineup_confirmed": true,
+          "lineup_status": "Confirmed Lineup",
+          "play_probability_hint": 100,
+          "injury_tag": null,
+          "source": "rotowire_lineups",
+          "source_confidence": "medium"
+        },
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 1631230,
+          "player_name": "Dominick Barlow",
+          "position": "PF",
+          "lineup_confirmed": true,
+          "lineup_status": "Confirmed Lineup",
+          "play_probability_hint": 100,
+          "injury_tag": null,
+          "source": "rotowire_lineups",
+          "source_confidence": "medium"
+        },
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 1641737,
+          "player_name": "Adem Bona",
+          "position": "C",
+          "lineup_confirmed": true,
+          "lineup_status": "Confirmed Lineup",
+          "play_probability_hint": 100,
+          "injury_tag": null,
+          "source": "rotowire_lineups",
+          "source_confidence": "medium"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 201566,
+          "player_name": "Russell Westbrook",
+          "position": "PG",
+          "lineup_confirmed": true,
+          "lineup_status": "Confirmed Lineup",
+          "play_probability_hint": 100,
+          "injury_tag": null,
+          "source": "rotowire_lineups",
+          "source_confidence": "medium"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 1631342,
+          "player_name": "Daeqwon Plowden",
+          "position": "SG",
+          "lineup_confirmed": true,
+          "lineup_status": "Confirmed Lineup",
+          "play_probability_hint": 100,
+          "injury_tag": null,
+          "source": "rotowire_lineups",
+          "source_confidence": "medium"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 201942,
+          "player_name": "DeMar DeRozan",
+          "position": "SF",
+          "lineup_confirmed": true,
+          "lineup_status": "Confirmed Lineup",
+          "play_probability_hint": 100,
+          "injury_tag": null,
+          "source": "rotowire_lineups",
+          "source_confidence": "medium"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 1630173,
+          "player_name": "Precious Achiuwa",
+          "position": "PF",
+          "lineup_confirmed": true,
+          "lineup_status": "Confirmed Lineup",
+          "play_probability_hint": 100,
+          "injury_tag": null,
+          "source": "rotowire_lineups",
+          "source_confidence": "medium"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 1642875,
+          "player_name": "Maxime Raynaud",
+          "position": "C",
+          "lineup_confirmed": true,
+          "lineup_status": "Confirmed Lineup",
+          "play_probability_hint": 100,
+          "injury_tag": null,
+          "source": "rotowire_lineups",
+          "source_confidence": "medium"
+        }
+      ],
+      "projected_absences": [
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 1641780,
+          "player_name": "Johni Broome",
+          "position": "C",
+          "play_probability_hint": 0,
+          "injury_tag": "Out",
+          "availability_bucket": "may_not_play",
+          "source": "rotowire_lineups",
+          "source_confidence": "medium"
+        },
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 203954,
+          "player_name": "Joel Embiid",
+          "position": "C",
+          "play_probability_hint": 0,
+          "injury_tag": "Out",
+          "availability_bucket": "may_not_play",
+          "source": "rotowire_lineups",
+          "source_confidence": "medium"
+        },
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 202331,
+          "player_name": "Paul George",
+          "position": "F",
+          "play_probability_hint": 0,
+          "injury_tag": "Out",
+          "availability_bucket": "may_not_play",
+          "source": "rotowire_lineups",
+          "source_confidence": "medium"
+        },
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 1630178,
+          "player_name": "Tyrese Maxey",
+          "position": "G",
+          "play_probability_hint": 0,
+          "injury_tag": "Out",
+          "availability_bucket": "may_not_play",
+          "source": "rotowire_lineups",
+          "source_confidence": "medium"
+        },
+        {
+          "team_abbr": "PHI",
+          "team_id": 1610612755,
+          "player_id": 1626162,
+          "player_name": "Kelly Oubre",
+          "position": "F",
+          "play_probability_hint": 0,
+          "injury_tag": "Out",
+          "availability_bucket": "may_not_play",
+          "source": "rotowire_lineups",
+          "source_confidence": "medium"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 1629234,
+          "player_name": "Drew Eubanks",
+          "position": "C",
+          "play_probability_hint": 0,
+          "injury_tag": "OFS",
+          "availability_bucket": "may_not_play",
+          "source": "rotowire_lineups",
+          "source_confidence": "medium"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 1629631,
+          "player_name": "De'Andre Hunter",
+          "position": "F",
+          "play_probability_hint": 0,
+          "injury_tag": "OFS",
+          "availability_bucket": "may_not_play",
+          "source": "rotowire_lineups",
+          "source_confidence": "medium"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 203897,
+          "player_name": "Zach LaVine",
+          "position": "F",
+          "play_probability_hint": 0,
+          "injury_tag": "OFS",
+          "availability_bucket": "may_not_play",
+          "source": "rotowire_lineups",
+          "source_confidence": "medium"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 1627734,
+          "player_name": "Domantas Sabonis",
+          "position": "C",
+          "play_probability_hint": 0,
+          "injury_tag": "OFS",
+          "availability_bucket": "may_not_play",
+          "source": "rotowire_lineups",
+          "source_confidence": "medium"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 1642269,
+          "player_name": "Devin Carter",
+          "position": "G",
+          "play_probability_hint": 0,
+          "injury_tag": "Out",
+          "availability_bucket": "may_not_play",
+          "source": "rotowire_lineups",
+          "source_confidence": "medium"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 1642363,
+          "player_name": "Nique Clifford",
+          "position": "G",
+          "play_probability_hint": 0,
+          "injury_tag": "Out",
+          "availability_bucket": "may_not_play",
+          "source": "rotowire_lineups",
+          "source_confidence": "medium"
+        },
+        {
+          "team_abbr": "SAC",
+          "team_id": 1610612758,
+          "player_id": 1631099,
+          "player_name": "Keegan Murray",
+          "position": "F",
+          "play_probability_hint": 0,
+          "injury_tag": "Out",
+          "availability_bucket": "may_not_play",
+          "source": "rotowire_lineups",
+          "source_confidence": "medium"
+        }
+      ]
+    },
+    {
+      "game_id": "0022501018",
+      "game_time_utc": "2026-03-20T20:00:00",
+      "game_status": 1,
+      "game_status_text": "8:00 pm ET",
+      "away_team": {
+        "team_abbr": "ATL",
+        "team_id": 1610612737
+      },
+      "home_team": {
+        "team_abbr": "HOU",
+        "team_id": 1610612745
+      },
+      "sources_present": {
+        "nba_live_boxscore": false,
+        "rotowire_lineups": false
+      },
+      "availability": [],
+      "official_starters": [],
+      "projected_starters": [],
+      "projected_absences": []
+    },
+    {
+      "game_id": "0022501021",
+      "game_time_utc": "2026-03-20T21:00:00",
+      "game_status": 1,
+      "game_status_text": "9:00 pm ET",
+      "away_team": {
+        "team_abbr": "TOR",
+        "team_id": 1610612761
+      },
+      "home_team": {
+        "team_abbr": "DEN",
+        "team_id": 1610612743
+      },
+      "sources_present": {
+        "nba_live_boxscore": false,
+        "rotowire_lineups": false
+      },
+      "availability": [],
+      "official_starters": [],
+      "projected_starters": [],
+      "projected_absences": []
+    }
+  ],
+  "unmatched_rotowire_games": [
+    {
+      "away_abbr": "DET",
+      "home_abbr": "WAS",
+      "lineup_status": "Confirmed Lineup"
+    },
+    {
+      "away_abbr": "ORL",
+      "home_abbr": "CHA",
+      "lineup_status": "Confirmed Lineup"
+    },
+    {
+      "away_abbr": "LAC",
+      "home_abbr": "NOP",
+      "lineup_status": "Confirmed Lineup"
+    },
+    {
+      "away_abbr": "CLE",
+      "home_abbr": "CHI",
+      "lineup_status": "Confirmed Lineup"
+    },
+    {
+      "away_abbr": "LAL",
+      "home_abbr": "MIA",
+      "lineup_status": "Confirmed Lineup"
+    },
+    {
+      "away_abbr": "PHX",
+      "home_abbr": "SAS",
+      "lineup_status": "Confirmed Lineup"
+    },
+    {
+      "away_abbr": "MIL",
+      "home_abbr": "UTA",
+      "lineup_status": "Confirmed Lineup"
+    }
+  ]
+}

@@ -10,7 +10,12 @@ from api.schemas.health import (
     PregameContextHealth,
     SignalRunHealth,
 )
-from api.services.health_service import _build_health_alerts, get_injury_matching_coverage, get_odds_snapshot_coverage
+from api.services.health_service import (
+    _build_health_alerts,
+    _build_pregame_context_health,
+    get_injury_matching_coverage,
+    get_odds_snapshot_coverage,
+)
 
 
 def test_build_health_alerts_flags_stale_injury_and_missing_audit() -> None:
@@ -54,6 +59,39 @@ def test_build_health_alerts_warns_on_signal_audit_lag_and_fallback_usage() -> N
     assert "signal_audit_lag" in codes
     assert "signals_partially_blocked" in codes
     assert "signals_using_fallback" in codes
+
+
+def test_build_health_alerts_uses_et_slate_date_for_injury_freshness() -> None:
+    alerts = _build_health_alerts(
+        now=datetime(2026, 3, 20, 3, 30, 0),
+        today_game_ids=["G1"],
+        lines=LinesHealth(tonight_game_count=1, tonight_prop_count=12, stale_captures=0),
+        injury_reports=InjuryReportsHealth(latest_report_date="2026-03-19"),
+        pregame_context=PregameContextHealth(tonight_games_with_context=1, tonight_games_missing_context=0),
+        signal_run=SignalRunHealth(
+            signals_generated=12,
+            latest_persisted_at=datetime(2026, 3, 20, 3, 25, 0),
+            latest_audit_source_prop_captured_at=datetime(2026, 3, 20, 3, 25, 0),
+            audit_lag_minutes=0,
+        ),
+    )
+
+    codes = {alert.code for alert in alerts}
+
+    assert "injury_reports_stale" not in codes
+
+
+def test_build_pregame_context_health_scopes_to_current_phase_games_when_available() -> None:
+    db = MagicMock()
+    db.execute.side_effect = [
+        SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: ["G2"])),
+        SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: ["G2"])),
+    ]
+
+    health = _build_pregame_context_health(db, ["G1", "G2", "G3"])
+
+    assert health.tonight_games_with_context == 1
+    assert health.tonight_games_missing_context == 0
 
 
 def test_build_health_alerts_escalates_when_all_signals_are_blocked() -> None:

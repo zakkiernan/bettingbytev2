@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -34,6 +35,7 @@ _STALE_CAPTURE_MINUTES = 60
 _SIGNAL_AUDIT_LAG_WARNING_MINUTES = 20
 _SIGNAL_AUDIT_LAG_CRITICAL_MINUTES = 60
 _PREGAME_ODDS_PHASES = ("pregame", "early", "late", "tip", "accumulation")
+_HEALTH_SLATE_TIMEZONE = ZoneInfo("America/New_York")
 
 
 def _today_window() -> tuple[datetime, datetime]:
@@ -270,21 +272,43 @@ def get_injury_matching_coverage(db: Session) -> dict[str, object]:
 def _build_pregame_context_health(
     db: Session, today_game_ids: list[str]
 ) -> PregameContextHealth:
-    """Count tonight's games that have pregame context snapshots."""
+    """Count today's in-scope games that have pregame context snapshots.
+
+    During live slates, `sync_pregame_markets()` only refreshes context for games that
+    still appear in the latest `snapshot_phase='current'` pregame prop capture. Earlier
+    finalized games may have historical pregame context but are no longer part of the
+    current refresh scope. Health should mirror that runtime scope when current-phase
+    markets are available.
+    """
     if not today_game_ids:
         return PregameContextHealth()
 
-    games_with_context = (
+    current_phase_game_ids = set(
         db.execute(
-            select(PregameContextSnapshot.game_id)
-            .where(PregameContextSnapshot.game_id.in_(today_game_ids))
+            select(PlayerPropSnapshot.game_id)
+            .where(
+                PlayerPropSnapshot.game_id.in_(today_game_ids),
+                PlayerPropSnapshot.is_live == False,  # noqa: E712
+                PlayerPropSnapshot.snapshot_phase == "current",
+            )
             .distinct()
         )
         .scalars()
         .all()
     )
-    with_context = len(set(games_with_context))
-    missing_context = len(today_game_ids) - with_context
+    scope_game_ids = current_phase_game_ids or set(today_game_ids)
+
+    games_with_context = set(
+        db.execute(
+            select(PregameContextSnapshot.game_id)
+            .where(PregameContextSnapshot.game_id.in_(scope_game_ids))
+            .distinct()
+        )
+        .scalars()
+        .all()
+    )
+    with_context = len(games_with_context)
+    missing_context = len(scope_game_ids) - with_context
 
     return PregameContextHealth(
         tonight_games_with_context=with_context,
@@ -299,6 +323,11 @@ def _build_signal_run_health(
     return stats_signal_service.build_signal_run_health(db, today_game_ids)
 
 
+def _current_slate_date_iso(now: datetime) -> str:
+    localized_now = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
+    return localized_now.astimezone(_HEALTH_SLATE_TIMEZONE).date().isoformat()
+
+
 def _build_health_alerts(
     *,
     now: datetime,
@@ -309,7 +338,7 @@ def _build_health_alerts(
     signal_run: SignalRunHealth,
 ) -> list[HealthAlert]:
     alerts: list[HealthAlert] = []
-    today_iso = now.date().isoformat()
+    today_iso = _current_slate_date_iso(now)
 
     if today_game_ids and lines.tonight_prop_count == 0:
         alerts.append(

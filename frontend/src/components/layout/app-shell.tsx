@@ -4,8 +4,8 @@ import Link from "next/link";
 import { Bolt, ChevronRight } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
-import { primaryNavigation, quickLinks } from "@/lib/navigation";
-import { fetchHealth, fetchGamesToday } from "@/lib/api";
+import { fetchGamesToday, fetchHealth } from "@/lib/api";
+import { internalNavigation, primaryNavigation, quickLinks, sportsNavigation } from "@/lib/navigation";
 import { cn } from "@/lib/utils";
 
 async function HeaderMetrics() {
@@ -59,11 +59,38 @@ function MetricPill({
   );
 }
 
+function SportSelector() {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-xs uppercase tracking-[0.18em] text-[color:var(--color-text-muted)]">Sport</span>
+      <div className="flex items-center gap-1 rounded-lg border border-[color:var(--color-border-subtle)] bg-[color:var(--color-surface)] p-1">
+        {sportsNavigation.map((sport) =>
+          sport.enabled ? (
+            <Link
+              key={sport.key}
+              href={sport.href}
+              className="rounded-md bg-[color:var(--color-accent-muted)] px-2.5 py-1 text-xs font-medium text-[color:var(--color-accent)]"
+            >
+              {sport.label}
+            </Link>
+          ) : (
+            <span
+              key={sport.key}
+              className="rounded-md px-2.5 py-1 text-xs font-medium text-[color:var(--color-text-muted)]"
+            >
+              {sport.label}
+            </span>
+          ),
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function AppShell({ children }: { children: ReactNode }) {
   return (
     <div className="min-h-screen bg-[color:var(--color-background)] text-[color:var(--color-text-primary)]">
       <div className="mx-auto grid min-h-screen max-w-[1440px] grid-cols-1 md:grid-cols-[240px_minmax(0,1fr)]">
-        {/* Sidebar */}
         <aside className="hidden border-r border-[color:var(--color-border-subtle)] bg-[color:var(--color-surface)] md:flex md:flex-col">
           <div className="flex items-center gap-3 border-b border-[color:var(--color-border-subtle)] px-5 py-4">
             <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[color:var(--color-accent-muted)] text-[color:var(--color-accent)]">
@@ -72,6 +99,10 @@ export function AppShell({ children }: { children: ReactNode }) {
             <div>
               <p className="text-sm font-semibold">BettingByte</p>
             </div>
+          </div>
+
+          <div className="px-3 py-3">
+            <SportSelector />
           </div>
 
           <nav className="flex-1 space-y-0.5 px-3 py-3">
@@ -102,30 +133,45 @@ export function AppShell({ children }: { children: ReactNode }) {
               </Link>
             ))}
           </div>
+
+          {/* Internal tools */}
+          <div className="mx-3 mb-3 border-t border-[color:var(--color-border-subtle)] pt-3">
+            {internalNavigation.map(({ href, label, icon: Icon }) => (
+              <Link
+                key={href}
+                href={href}
+                className="flex items-center gap-2.5 rounded-lg px-3 py-2 text-xs text-[color:var(--color-text-muted)] transition-colors hover:bg-[color:var(--color-surface-elevated)] hover:text-[color:var(--color-text-secondary)]"
+              >
+                <Icon className="h-3.5 w-3.5" />
+                <span>{label}</span>
+                <Badge className="ml-auto scale-90">Internal</Badge>
+              </Link>
+            ))}
+          </div>
         </aside>
 
-        {/* Main content area */}
         <div className="flex min-h-screen flex-col">
           <header className="sticky top-0 z-20 flex items-center justify-between border-b border-[color:var(--color-border-subtle)] bg-[color:var(--color-background)]/95 px-4 py-3 backdrop-blur-sm md:px-6">
             <div className="flex items-center gap-4">
               <h1 className="text-sm font-semibold">BettingByte</h1>
-              <Badge>Internal</Badge>
             </div>
 
-            <Suspense
-              fallback={
-                <div className="flex items-center gap-4">
-                  {Array.from({ length: 3 }).map((_, i) => (
-                    <div key={i} className="h-4 w-16 animate-pulse rounded bg-[color:var(--color-surface-elevated)]" />
-                  ))}
-                </div>
-              }
-            >
-              <HeaderMetrics />
-            </Suspense>
+            <div className="flex items-center gap-4">
+              <SportSelector />
+              <Suspense
+                fallback={
+                  <div className="flex items-center gap-4">
+                    {Array.from({ length: 3 }).map((_, i) => (
+                      <div key={i} className="h-4 w-16 animate-pulse rounded bg-[color:var(--color-surface-elevated)]" />
+                    ))}
+                  </div>
+                }
+              >
+                <HeaderMetrics />
+              </Suspense>
+            </div>
           </header>
 
-          {/* Mobile nav */}
           <div className="flex gap-1 overflow-x-auto border-b border-[color:var(--color-border-subtle)] px-4 md:hidden">
             {primaryNavigation.map(({ href, label }) => (
               <Link

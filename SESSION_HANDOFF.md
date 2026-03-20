@@ -1,13 +1,135 @@
 # SESSION_HANDOFF.md
 
 ## Session Date
-2026-03-18
+2026-03-19
 
 ## Current Priority
 
-Pregame reliability is still the priority. Frontend stays frozen. Live-model work stays blocked until pregame readiness, auditability, and historical line coverage are stronger.
+Pregame reliability is still the priority. The codebase is now namespaced for multi-sport growth: shared infrastructure stays in common/shared packages, NBA-specific code lives under `nba/`, and MLB stubs are in place for the next sport without changing today's business logic.
 
 ## What Was Completed
+
+### NBA ingestion now pulls 12 additional stats.nba.com endpoints
+
+Added 12 new NBA ingestion surfaces across the existing client -> writer -> job -> scheduler pipeline:
+
+Postgame enrichment per game:
+- shot chart detail
+- hustle boxscore
+- matchup boxscore
+- win probability play-by-play
+
+Daily season-level jobs:
+- player clutch stats
+- player hustle stats
+- synergy play types
+- player tracking season stats (`CatchShoot`, `PullUpShot`, `Drives`)
+- player on/off stats
+- player defensive tracking
+- player shot locations
+- lineup stats
+
+Database/runtime changes:
+- added 12 new SQLAlchemy models in `database/models/nba.py`
+- added matching writer upserts in `ingestion/common/writer.py`
+- added new bundle functions in `ingestion/nba/nba_client.py`
+- wired new daily jobs in `ingestion/nba/jobs.py`
+- scheduled the new daily jobs in `ingestion/common/scheduler.py`
+- extended postgame enrichment so finished games now also archive the four new per-game feeds
+- generated a new Alembic migration: `alembic/versions/f4a95813c268_add_extended_nba_stats_ingestion_tables.py`
+
+Implementation notes:
+- all new client calls use `_call_with_retries(...)`
+- all calls apply rate limiting after each request
+- player on/off uses a heavier delay because it loops over all 30 teams
+- shot-location parsing handles the grouped zone-header response shape from `LeagueDashPlayerShotLocations`
+- synergy play types currently uses a single empty `play_type_nullable=""` request because the current nba_api response returns all play types in one payload
+
+Verification:
+- `E:\dev\projects\bettingbyte-v2\.venv\Scripts\python.exe -m pytest tests/ -q` -> `165 passed`
+- `E:\dev\projects\bettingbyte-v2\.venv\Scripts\python.exe -m compileall analytics api ingestion database tests` -> success
+- targeted syntax check passed for the modified client, jobs, writer, scheduler, models, and migration files
+
+### Backend and frontend were restructured for sport namespaces
+
+Backend layout changes:
+- shared analytics moved under `analytics/common/`
+- NBA analytics moved under `analytics/nba/`
+- shared ingestion moved under `ingestion/common/`
+- NBA ingestion moved under `ingestion/nba/`
+- NBA API routes, schemas, and services moved under `api/routes/nba/`, `api/schemas/nba/`, and `api/services/nba/`
+- database models now live in the `database/models/` package with `common.py`, `nba.py`, and an MLB stub
+- `api/main.py` now mounts NBA routes at `/api/nba/*` and also keeps the old `/api/*` paths working for backward compatibility
+
+Compatibility strategy:
+- every old Python module path that moved now exists as a shim that aliases the real module object
+- this preserves old imports like `from analytics.pregame_model import ...`
+- it also preserves monkeypatching and private-helper imports used by tests
+
+Frontend layout changes:
+- NBA pages moved under `frontend/src/app/(app)/nba/`
+- legacy `/games`, `/live`, `/props`, and `/player` pages now redirect to the new `/nba/...` routes
+- shared types were split into `frontend/src/types/common.ts`
+- NBA types now live in `frontend/src/types/nba.ts`
+- `frontend/src/types/api.ts` is now a backward-compat re-export shim
+- `frontend/src/lib/nba-api.ts` now targets `/api/nba`
+- `frontend/src/lib/api.ts` remains the shared entrypoint and re-exports NBA fetchers
+- navigation and the app shell now expose an explicit sport selector/context
+
+Verification:
+- `E:\dev\projects\bettingbyte-v2\.venv\Scripts\python.exe -m pytest tests/ -q` -> `165 passed`
+- `E:\dev\projects\bettingbyte-v2\.venv\Scripts\python.exe -m compileall analytics api ingestion database tests` -> success
+- local API smoke checks:
+  - `GET /api/nba/games/today` -> `200`
+  - `GET /api/games/today` -> `200`
+  - `GET /api/nba/live/active` -> `200`
+  - `GET /health` -> `200`
+- frontend verification:
+  - `npm run build` in `frontend/` completed successfully
+  - Next emitted a non-fatal ESLint patch warning during build, but the build finished and generated both legacy and `/nba/*` routes
+### Absence-impact defaults were re-enabled conservatively
+
+Verified the current absence-impact pipeline end to end:
+- `analytics/features_opportunity.py` is already passing signed deltas through `_build_absence_impact_features`
+- `analytics/opportunity_context.py` is already clamping absence-impact adjustments symmetrically
+- `analytics/opportunity_model.py` now uses conservative non-zero defaults:
+  - `absence_impact_minutes_factor=0.15`
+  - `absence_impact_minutes_cap=3.0`
+  - `absence_impact_usage_factor=0.10`
+  - `absence_impact_usage_cap=0.02`
+  - `absence_impact_touches_factor=0.08`
+  - `absence_impact_touches_cap=3.0`
+  - `absence_impact_passes_factor=0.06`
+  - `absence_impact_passes_cap=2.0`
+
+Important note:
+- `absence_impact_confidence_floor` remains `0.35` in code
+- the task prompt said this "should be ~0.18", but the instruction also said not to change logic beyond the coefficient re-enable, so the floor was left unchanged intentionally
+
+Verification:
+- `E:\dev\projects\bettingbyte-v2\.venv\Scripts\python.exe -m pytest tests/ -q`
+- result after later ingestion additions: `165 passed`
+
+### Live model and live API endpoints were implemented
+
+Added backend-only live projection support:
+- new live model module: `analytics/live_model.py`
+- new service layer: `api/services/live_service.py`
+- `api/routes/live.py` now queries the DB through `Depends(get_db)` instead of returning mocks
+
+Implemented behavior:
+- pace-adjusted live projections for points, rebounds, assists, and threes
+- regulation-progress blending between pregame and live pace extrapolation
+- foul-trouble minutes reduction
+- live alerts for hot starts, cold starts, edge emergence, pace shifts, and foul trouble
+- `/api/live/active` returns real active-game summaries
+- `/api/live/{game_id}` returns real game detail payloads with players, alerts, and pace summary
+
+Verification:
+- `E:\dev\projects\bettingbyte-v2\.venv\Scripts\python.exe -m compileall analytics api`
+- local API smoke test against a short-lived server:
+  - `GET /api/live/active` -> `200`, returned `11` active games in the current DB
+  - `GET /api/live/0022501008` -> `200`, returned valid JSON detail payload
 
 ### 1. Fixed the highest-value stat-model biases
 
@@ -152,8 +274,9 @@ Recommendation read:
 
 Absence-impact status:
 - signed-delta plumbing is fixed
-- default coefficients remain zero
-- next absence-impact work should be pair-quality filtering, not coefficient tuning
+- conservative default coefficients are re-enabled
+- confidence floor is still `0.35` in code
+- next absence-impact work should be a controlled backtest on the re-enabled signed layer, then pair-quality filtering if noise remains
 
 Official injury matching status:
 - raw named-entry resolution is effectively complete in the local archive
@@ -163,14 +286,15 @@ Official injury matching status:
 
 ### Highest-value next steps
 1. Audit how player-level official injury rows are used in opportunity features. Matching coverage is fixed, but it is not moving opportunity accuracy yet.
-2. Let the new odds archive accumulate. Calibration and edge validation are still bottlenecked by sparse line history.
-3. Revisit assists and threes threshold policy only after line coverage is denser.
-4. Add pair-level suppression / stronger pair thresholds before trying to re-enable absence-impact bonuses.
+2. Run a controlled absence-impact backtest now that signed deltas and conservative defaults are live. Confirm the re-enabled layer helps before tuning further.
+3. Let the new odds archive accumulate. Calibration and edge validation are still bottlenecked by sparse line history.
+4. Revisit assists and threes threshold policy only after line coverage is denser.
+5. If the absence-impact layer is still noisy, add pair-level suppression / stronger pair thresholds instead of increasing coefficients.
 
 ### What not to do next
-- do not start live model work yet
+- do not expand live modeling beyond the current backend implementation until pregame trust improves
 - do not touch the frontend
-- do not re-enable absence-impact by default without a new controlled backtest
+- do not increase absence-impact aggressiveness without a new controlled backtest
 
 ## Verification
 
@@ -182,3 +306,4 @@ E:\dev\projects\bettingbyte-v2\.venv\Scripts\python.exe -m compileall E:\dev\pro
 E:\dev\projects\bettingbyte-v2\.venv\Scripts\python.exe -m pytest E:\dev\projects\bettingbyte-v2\tests\test_jobs.py E:\dev\projects\bettingbyte-v2\tests\test_scheduler.py E:\dev\projects\bettingbyte-v2\tests\test_health_service.py -q
 E:\dev\projects\bettingbyte-v2\.venv\Scripts\alembic.exe upgrade head
 ```
+

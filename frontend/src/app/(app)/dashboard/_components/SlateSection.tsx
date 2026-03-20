@@ -25,7 +25,7 @@ export default async function SlateSection() {
             })
           : null;
         return (
-          <Link key={g.game_id} href={`/games/${g.game_id}`}>
+          <Link key={g.game_id} href={`/nba/games/${g.game_id}`}>
             <Card className="cursor-pointer">
               <div className="flex items-start justify-between">
                 <div>
@@ -61,3 +61,4 @@ export default async function SlateSection() {
     </div>
   );
 }
+

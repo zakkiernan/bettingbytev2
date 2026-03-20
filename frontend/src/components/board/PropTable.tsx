@@ -209,7 +209,7 @@ function PropRow({ prop }: { prop: PropBoardRow }) {
         <PlayerAvatar playerId={prop.player_id} playerName={prop.player_name} size="sm" />
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <Link href={`/player/${prop.player_id}`} className="font-semibold hover:text-[color:var(--color-accent)]">
+            <Link href={`/nba/player/${prop.player_id}`} className="font-semibold hover:text-[color:var(--color-accent)]">
               {prop.player_name}
             </Link>
           <span className="text-xs text-[color:var(--color-text-muted)]">
@@ -274,7 +274,7 @@ function PropRow({ prop }: { prop: PropBoardRow }) {
       </div>
 
       <div className="text-right">
-        <Link href={`/props/${prop.signal_id}`} className="inline-flex rounded-xl border border-[color:var(--color-border)] px-3 py-2 text-sm text-[color:var(--color-text-secondary)] transition-colors hover:border-[color:var(--color-accent)] hover:text-[color:var(--color-text-primary)]">
+        <Link href={`/nba/props/${prop.signal_id}`} className="inline-flex rounded-xl border border-[color:var(--color-border)] px-3 py-2 text-sm text-[color:var(--color-text-secondary)] transition-colors hover:border-[color:var(--color-accent)] hover:text-[color:var(--color-text-primary)]">
           Open
         </Link>
       </div>
@@ -398,3 +398,5 @@ export function PropTable({ initialProps, games, statTypes = [] }: Props) {
     </div>
   );
 }
+
+

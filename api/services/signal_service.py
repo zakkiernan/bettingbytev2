@@ -1,32 +1,5 @@
-from __future__ import annotations
+"""Backward-compat shim - real code is in api.services.nba.signal_service."""
+from importlib import import_module as _import_module
+import sys as _sys
 
-from sqlalchemy.orm import Session
-
-from api.schemas.board import PropBoardResponse
-from api.schemas.detail import PropDetailResponse
-from api.schemas.line_movement import LineMovementResponse
-from api.services import stats_signal_service
-
-
-def get_prop_board(
-    db: Session,
-    game_id: str | None = None,
-    stat_type: str | None = None,
-    recommended_only: bool = False,
-    min_confidence: float | None = None,
-) -> PropBoardResponse:
-    return stats_signal_service.get_prop_board_response(
-        db,
-        game_id=game_id,
-        stat_type=stat_type,
-        recommended_only=recommended_only,
-        min_confidence=min_confidence,
-    )
-
-
-def get_prop_detail(db: Session, signal_id: int) -> PropDetailResponse | None:
-    return stats_signal_service.get_prop_detail_response(db, signal_id)
-
-
-def get_line_movement(db: Session, signal_id: int) -> LineMovementResponse | None:
-    return stats_signal_service.get_line_movement(db, signal_id)
+_sys.modules[__name__] = _import_module("api.services.nba.signal_service")
