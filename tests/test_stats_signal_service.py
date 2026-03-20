@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from analytics.features_pregame import PregamePointsFeatures
 from api.schemas.board import SignalReadiness
 from api.schemas.detail import FeatureSnapshot, InjuryEntry, OpportunityContext, PointsBreakdown
+from api.services import audit_service
 from api.services.stats_signal_service import (
     _build_signal_readiness,
     build_signal_run_health,
@@ -22,7 +23,7 @@ from api.services.stats_signal_service import (
     repair_current_signal_snapshots,
 )
 from database.db import Base
-from database.models import Game, OddsSnapshot, PlayerPropSnapshot, StatsSignalSnapshot
+from database.models import Game, OddsSnapshot, PlayerPropSnapshot, SignalAuditTrail, StatsSignalSnapshot
 
 
 class StatsSignalProfileTests(unittest.TestCase):
@@ -251,8 +252,11 @@ class SignalReadinessTests(unittest.TestCase):
             snapshot=snapshot,
             game=game,
             feature=None,
+            recent_logs=[],
             recent_games_count=4,
+            opportunity_confidence=None,
             latest_injury_report_at=None,
+            latest_odds_snapshot_at=None,
             evaluation_time=datetime(2026, 3, 16, 18, 30, 0),
         )
 
@@ -288,8 +292,11 @@ class SignalReadinessTests(unittest.TestCase):
             snapshot=snapshot,
             game=SimpleNamespace(game_time_utc=datetime(2026, 3, 16, 22, 0, 0)),
             feature=feature,
+            recent_logs=[],
             recent_games_count=10,
+            opportunity_confidence=0.62,
             latest_injury_report_at=datetime(2026, 3, 16, 17, 45, 0),
+            latest_odds_snapshot_at=datetime(2026, 3, 16, 18, 10, 0),
             evaluation_time=datetime(2026, 3, 16, 18, 20, 0),
         )
 
@@ -298,6 +305,209 @@ class SignalReadinessTests(unittest.TestCase):
         self.assertIn("Signal is leaning on official injury team context", readiness.warnings)
         self.assertIn("Pregame context confidence is only 0.40", readiness.warnings)
 
+    def test_readiness_marks_complete_signal_as_ready(self):
+        snapshot = PlayerPropSnapshot(
+            id=1,
+            game_id="G1",
+            player_id="123",
+            player_name="Test Player",
+            team="BOS",
+            opponent="NYK",
+            stat_type="points",
+            line=24.5,
+            over_odds=-110,
+            under_odds=-110,
+            is_live=False,
+            snapshot_phase="current",
+            captured_at=datetime(2026, 3, 16, 18, 0, 0),
+        )
+
+        readiness = _build_signal_readiness(
+            snapshot=snapshot,
+            game=SimpleNamespace(game_time_utc=datetime(2026, 3, 16, 23, 0, 0)),
+            feature=StatsSignalProfileTests().build_feature(),
+            recent_logs=[SimpleNamespace(points=22.0) for _ in range(10)],
+            recent_games_count=10,
+            opportunity_confidence=0.74,
+            latest_injury_report_at=datetime(2026, 3, 16, 17, 45, 0),
+            latest_odds_snapshot_at=datetime(2026, 3, 16, 17, 50, 0),
+            evaluation_time=datetime(2026, 3, 16, 18, 15, 0),
+        )
+
+        self.assertTrue(readiness.is_ready)
+        self.assertEqual(readiness.status, "ready")
+        self.assertEqual(readiness.blockers, [])
+        self.assertEqual(readiness.warnings, [])
+
+    def test_readiness_blocks_stale_line_snapshot(self):
+        snapshot = PlayerPropSnapshot(
+            id=1,
+            game_id="G1",
+            player_id="123",
+            player_name="Test Player",
+            team="BOS",
+            opponent="NYK",
+            stat_type="points",
+            line=24.5,
+            over_odds=-110,
+            under_odds=-110,
+            is_live=False,
+            snapshot_phase="current",
+            captured_at=datetime(2026, 3, 16, 15, 0, 0),
+        )
+
+        readiness = _build_signal_readiness(
+            snapshot=snapshot,
+            game=SimpleNamespace(game_time_utc=datetime(2026, 3, 16, 20, 0, 0)),
+            feature=StatsSignalProfileTests().build_feature(),
+            recent_logs=[SimpleNamespace(points=22.0) for _ in range(10)],
+            recent_games_count=10,
+            opportunity_confidence=0.74,
+            latest_injury_report_at=datetime(2026, 3, 16, 17, 45, 0),
+            latest_odds_snapshot_at=datetime(2026, 3, 16, 17, 50, 0),
+            evaluation_time=datetime(2026, 3, 16, 18, 15, 0),
+        )
+
+        self.assertEqual(readiness.status, "blocked")
+        self.assertIn("Pregame line snapshot is 195 minutes old", readiness.blockers)
+
+    def test_readiness_blocks_low_opportunity_confidence(self):
+        snapshot = PlayerPropSnapshot(
+            id=1,
+            game_id="G1",
+            player_id="123",
+            player_name="Test Player",
+            team="BOS",
+            opponent="NYK",
+            stat_type="points",
+            line=24.5,
+            over_odds=-110,
+            under_odds=-110,
+            is_live=False,
+            snapshot_phase="current",
+            captured_at=datetime(2026, 3, 16, 18, 0, 0),
+        )
+
+        readiness = _build_signal_readiness(
+            snapshot=snapshot,
+            game=SimpleNamespace(game_time_utc=datetime(2026, 3, 16, 22, 0, 0)),
+            feature=StatsSignalProfileTests().build_feature(),
+            recent_logs=[SimpleNamespace(points=22.0) for _ in range(10)],
+            recent_games_count=10,
+            opportunity_confidence=0.31,
+            latest_injury_report_at=datetime(2026, 3, 16, 17, 45, 0),
+            latest_odds_snapshot_at=datetime(2026, 3, 16, 17, 50, 0),
+            evaluation_time=datetime(2026, 3, 16, 18, 15, 0),
+        )
+
+        self.assertEqual(readiness.status, "blocked")
+        self.assertIn("Opportunity confidence is only 0.31", readiness.blockers)
+
+    def test_readiness_blocks_missing_rebounds_feature_fields(self):
+        snapshot = PlayerPropSnapshot(
+            id=1,
+            game_id="G1",
+            player_id="123",
+            player_name="Test Player",
+            team="BOS",
+            opponent="NYK",
+            stat_type="rebounds",
+            line=8.5,
+            over_odds=-110,
+            under_odds=-110,
+            is_live=False,
+            snapshot_phase="current",
+            captured_at=datetime(2026, 3, 16, 18, 0, 0),
+        )
+        feature_payload = StatsSignalProfileTests().build_feature().to_dict()
+        feature_payload.update(season_rebounds_avg=None, season_reb_pct=None)
+        feature = SimpleNamespace(**feature_payload)
+
+        readiness = _build_signal_readiness(
+            snapshot=snapshot,
+            game=SimpleNamespace(game_time_utc=datetime(2026, 3, 16, 22, 0, 0)),
+            feature=feature,
+            recent_logs=[SimpleNamespace(rebounds=7.0) for _ in range(10)],
+            recent_games_count=10,
+            opportunity_confidence=0.74,
+            latest_injury_report_at=datetime(2026, 3, 16, 17, 45, 0),
+            latest_odds_snapshot_at=datetime(2026, 3, 16, 17, 50, 0),
+            evaluation_time=datetime(2026, 3, 16, 18, 15, 0),
+        )
+
+        self.assertEqual(readiness.status, "blocked")
+        self.assertIn(
+            "Missing rebounds feature data: season rebounds average, season rebound rate",
+            readiness.blockers,
+        )
+
+    def test_readiness_blocks_thin_non_zero_rebounds_sample(self):
+        snapshot = PlayerPropSnapshot(
+            id=1,
+            game_id="G1",
+            player_id="123",
+            player_name="Test Player",
+            team="BOS",
+            opponent="NYK",
+            stat_type="rebounds",
+            line=8.5,
+            over_odds=-110,
+            under_odds=-110,
+            is_live=False,
+            snapshot_phase="current",
+            captured_at=datetime(2026, 3, 16, 18, 0, 0),
+        )
+        feature_payload = StatsSignalProfileTests().build_feature().to_dict()
+        feature_payload.update(season_rebounds_avg=8.2, season_reb_pct=0.16)
+        feature = SimpleNamespace(**feature_payload)
+
+        readiness = _build_signal_readiness(
+            snapshot=snapshot,
+            game=SimpleNamespace(game_time_utc=datetime(2026, 3, 16, 22, 0, 0)),
+            feature=feature,
+            recent_logs=[SimpleNamespace(rebounds=value) for value in (0, 0, 1, 0, 0, 0, 2, 0, 0, 0)],
+            recent_games_count=10,
+            opportunity_confidence=0.74,
+            latest_injury_report_at=datetime(2026, 3, 16, 17, 45, 0),
+            latest_odds_snapshot_at=datetime(2026, 3, 16, 17, 50, 0),
+            evaluation_time=datetime(2026, 3, 16, 18, 15, 0),
+        )
+
+        self.assertEqual(readiness.status, "blocked")
+        self.assertIn("Only 2 recent non-zero rebounds games are available", readiness.blockers)
+
+    def test_readiness_warns_when_odds_archive_is_stale(self):
+        snapshot = PlayerPropSnapshot(
+            id=1,
+            game_id="G1",
+            player_id="123",
+            player_name="Test Player",
+            team="BOS",
+            opponent="NYK",
+            stat_type="points",
+            line=24.5,
+            over_odds=-110,
+            under_odds=-110,
+            is_live=False,
+            snapshot_phase="current",
+            captured_at=datetime(2026, 3, 16, 18, 0, 0),
+        )
+
+        readiness = _build_signal_readiness(
+            snapshot=snapshot,
+            game=SimpleNamespace(game_time_utc=datetime(2026, 3, 16, 20, 30, 0)),
+            feature=StatsSignalProfileTests().build_feature(),
+            recent_logs=[SimpleNamespace(points=22.0) for _ in range(10)],
+            recent_games_count=10,
+            opportunity_confidence=0.74,
+            latest_injury_report_at=datetime(2026, 3, 16, 17, 45, 0),
+            latest_odds_snapshot_at=datetime(2026, 3, 16, 15, 0, 0),
+            evaluation_time=datetime(2026, 3, 16, 18, 15, 0),
+        )
+
+        self.assertEqual(readiness.status, "limited")
+        self.assertIn("Line snapshot may be stale - last captured 195 minutes ago.", readiness.warnings)
+
 
 class SignalRunHealthTests(unittest.TestCase):
     def setUp(self):
@@ -305,13 +515,13 @@ class SignalRunHealthTests(unittest.TestCase):
         self.SessionLocal = sessionmaker(bind=self.engine, autocommit=False, autoflush=False, expire_on_commit=False, class_=Session)
         Base.metadata.create_all(
             self.engine,
-            tables=[PlayerPropSnapshot.__table__, StatsSignalSnapshot.__table__],
+            tables=[PlayerPropSnapshot.__table__, StatsSignalSnapshot.__table__, SignalAuditTrail.__table__],
         )
 
     def tearDown(self):
         Base.metadata.drop_all(
             self.engine,
-            tables=[StatsSignalSnapshot.__table__, PlayerPropSnapshot.__table__],
+            tables=[SignalAuditTrail.__table__, StatsSignalSnapshot.__table__, PlayerPropSnapshot.__table__],
         )
         self.engine.dispose()
 
@@ -380,12 +590,19 @@ class SignalRunHealthTests(unittest.TestCase):
             )
 
         ready_row = SimpleNamespace(
+            stat_type="points",
             recommended_side="OVER",
             readiness=SignalReadiness(status="ready", is_ready=True),
         )
         blocked_row = SimpleNamespace(
+            stat_type="rebounds",
             recommended_side=None,
-            readiness=SignalReadiness(status="blocked", is_ready=False, using_fallback=True),
+            readiness=SignalReadiness(
+                status="blocked",
+                is_ready=False,
+                using_fallback=True,
+                blockers=["Opportunity confidence is only 0.20"],
+            ),
         )
 
         class _FakeCard:
@@ -407,6 +624,9 @@ class SignalRunHealthTests(unittest.TestCase):
         self.assertEqual(health.signals_ready, 1)
         self.assertEqual(health.signals_blocked, 1)
         self.assertEqual(health.signals_using_fallback, 1)
+        self.assertEqual(health.signals_by_stat_type, {"points": 1, "rebounds": 1})
+        self.assertEqual(health.blocked_by_stat_type, {"rebounds": 1})
+        self.assertEqual(health.blocked_reasons, {"Opportunity confidence is only 0.20": 1})
         self.assertEqual(health.latest_persisted_at, datetime(2026, 3, 16, 17, 55, 0))
         self.assertEqual(health.latest_audit_source_prop_captured_at, datetime(2026, 3, 16, 17, 50, 0))
         self.assertEqual(health.audit_lag_minutes, 10)
@@ -418,13 +638,13 @@ class SignalSnapshotPersistenceTests(unittest.TestCase):
         self.SessionLocal = sessionmaker(bind=self.engine, autocommit=False, autoflush=False, expire_on_commit=False, class_=Session)
         Base.metadata.create_all(
             self.engine,
-            tables=[StatsSignalSnapshot.__table__],
+            tables=[StatsSignalSnapshot.__table__, SignalAuditTrail.__table__],
         )
 
     def tearDown(self):
         Base.metadata.drop_all(
             self.engine,
-            tables=[StatsSignalSnapshot.__table__],
+            tables=[SignalAuditTrail.__table__, StatsSignalSnapshot.__table__],
         )
         self.engine.dispose()
 
@@ -540,15 +760,20 @@ class SignalSnapshotPersistenceTests(unittest.TestCase):
             metrics = persist_current_signal_snapshots()
 
         self.assertEqual(metrics["signal_snapshots"], 1)
+        self.assertEqual(metrics["signal_audit_rows"], 1)
         self.assertEqual(metrics["signal_recommendations"], 1)
 
         with self.session_scope() as session:
             row = session.query(StatsSignalSnapshot).one()
+            audit_row = session.query(SignalAuditTrail).one()
 
         self.assertEqual(row.player_id, "123")
         self.assertEqual(row.readiness_status, "ready")
         self.assertEqual(row.snapshot_phase, "current")
         self.assertEqual(row.source_injury_report_at, datetime(2026, 3, 16, 17, 45, 0))
+        self.assertEqual(audit_row.player_id, "123")
+        self.assertEqual(audit_row.snapshot_phase, "current")
+        self.assertEqual(audit_row.readiness_status, "ready")
 
 
 class SignalSnapshotRepairTests(unittest.TestCase):
@@ -557,13 +782,13 @@ class SignalSnapshotRepairTests(unittest.TestCase):
         self.SessionLocal = sessionmaker(bind=self.engine, autocommit=False, autoflush=False, expire_on_commit=False, class_=Session)
         Base.metadata.create_all(
             self.engine,
-            tables=[StatsSignalSnapshot.__table__],
+            tables=[StatsSignalSnapshot.__table__, SignalAuditTrail.__table__],
         )
 
     def tearDown(self):
         Base.metadata.drop_all(
             self.engine,
-            tables=[StatsSignalSnapshot.__table__],
+            tables=[SignalAuditTrail.__table__, StatsSignalSnapshot.__table__],
         )
         self.engine.dispose()
 

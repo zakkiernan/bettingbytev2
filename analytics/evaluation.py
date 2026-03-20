@@ -5,14 +5,20 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from math import sqrt
 from statistics import mean, median
-from typing import Any
+from typing import Any, Callable
 
 from analytics.features_opportunity import PregameFeatureRequest, _build_absence_impact_index, _build_defense_context, build_pregame_feature_seed
+from analytics.features_assists import build_pregame_assists_features_from_seed
 from analytics.features_pregame import build_pregame_points_features_from_seed
+from analytics.features_rebounds import build_pregame_rebounds_features_from_seed
+from analytics.features_threes import build_pregame_threes_features_from_seed
 from analytics.injury_report_loader import build_official_injury_report_index
+from analytics.assists_model import project_pregame_assists
 from analytics.opportunity_model import project_pregame_opportunity
 from analytics.pregame_context_loader import build_pregame_context_index, load_pregame_context_snapshot_rows
 from analytics.pregame_model import project_pregame_points
+from analytics.rebounds_model import project_pregame_rebounds
+from analytics.threes_model import project_pregame_threes
 from database.db import session_scope
 from database.models import (
     AbsenceImpactSummary,
@@ -242,6 +248,80 @@ class PregameOpportunityBacktestResult:
 
 
 @dataclass(slots=True)
+class PregameStatBacktestRow:
+    game_id: str
+    game_date: datetime
+    player_id: str
+    player_name: str
+    team_abbreviation: str
+    opponent_abbreviation: str
+    stat_type: str
+    projected_value: float
+    actual_value: float
+    actual_minutes: float | None
+    expected_minutes: float | None
+    error: float
+    abs_error: float
+    line: float | None
+    line_available: bool
+    over_probability: float
+    under_probability: float
+    edge_over: float
+    edge_under: float
+    confidence: float
+    recommended_side: str | None
+    line_delta: float | None
+    recommended_outcome: str | None
+    pregame_context_attached: bool
+    official_injury_attached: bool
+    context_source: str
+    absence_impact_sample_confidence: float | None
+    absence_impact_source_count: float | None
+    absence_impact_minutes_bonus: float
+    absence_impact_usage_bonus: float
+    breakdown: dict[str, float]
+
+
+@dataclass(slots=True)
+class PregameStatBacktestSummary:
+    stat_type: str
+    sample_size: int
+    line_available_count: int
+    line_available_pct: float
+    line_missing_count: int
+    line_missing_pct: float
+    pregame_context_attached_count: int
+    pregame_context_attached_pct: float
+    official_injury_attached_count: int
+    official_injury_attached_pct: float
+    mae: float
+    rmse: float
+    bias: float
+    median_abs_error: float
+    recommendation_count: int
+    hit_rate: float
+    largest_misses: list[dict[str, Any]]
+    notes: list[str]
+
+
+@dataclass(slots=True)
+class PregameStatBacktestResult:
+    summary: PregameStatBacktestSummary
+    rows: list[PregameStatBacktestRow]
+
+
+PregameReboundsBacktestRow = PregameStatBacktestRow
+PregameAssistsBacktestRow = PregameStatBacktestRow
+PregameThreesBacktestRow = PregameStatBacktestRow
+PregameReboundsBacktestSummary = PregameStatBacktestSummary
+PregameAssistsBacktestSummary = PregameStatBacktestSummary
+PregameThreesBacktestSummary = PregameStatBacktestSummary
+PregameReboundsBacktestResult = PregameStatBacktestResult
+PregameAssistsBacktestResult = PregameStatBacktestResult
+PregameThreesBacktestResult = PregameStatBacktestResult
+
+
+@dataclass(slots=True)
 class ContextAttachmentCoverage:
     pregame_context_attached_count: int
     official_injury_attached_count: int
@@ -325,11 +405,22 @@ def _summarize_absence_impact_confidence_buckets(rows: list[Any], *, error_attr:
 
 
 
+def _has_absence_impact_bonus(row: Any) -> bool:
+    return abs(float(getattr(row, "absence_impact_minutes_bonus", 0.0) or 0.0)) > 0.0001 or abs(
+        float(getattr(row, "absence_impact_usage_bonus", 0.0) or 0.0)
+    ) > 0.0001
+
+
+
 def summarize_points_absence_impact(rows: list[PregamePointsBacktestRow]) -> dict[str, Any]:
-    affected_rows = [row for row in rows if row.absence_impact_minutes_bonus > 0.0 or row.absence_impact_usage_bonus > 0.0]
-    minutes_affected_rows = [row for row in affected_rows if row.absence_impact_minutes_bonus > 0.0]
-    usage_only_rows = [row for row in affected_rows if row.absence_impact_minutes_bonus <= 0.0 and row.absence_impact_usage_bonus > 0.0]
-    unaffected_rows = [row for row in rows if row.absence_impact_minutes_bonus <= 0.0 and row.absence_impact_usage_bonus <= 0.0]
+    affected_rows = [row for row in rows if _has_absence_impact_bonus(row)]
+    minutes_affected_rows = [row for row in affected_rows if abs(float(row.absence_impact_minutes_bonus or 0.0)) > 0.0001]
+    usage_only_rows = [
+        row
+        for row in affected_rows
+        if abs(float(row.absence_impact_minutes_bonus or 0.0)) <= 0.0001 and abs(float(row.absence_impact_usage_bonus or 0.0)) > 0.0001
+    ]
+    unaffected_rows = [row for row in rows if not _has_absence_impact_bonus(row)]
 
     return {
         "affected_count": len(affected_rows),
@@ -366,10 +457,14 @@ def summarize_points_absence_impact(rows: list[PregamePointsBacktestRow]) -> dic
 
 
 def summarize_opportunity_absence_impact(rows: list[PregameOpportunityBacktestRow]) -> dict[str, Any]:
-    affected_rows = [row for row in rows if row.absence_impact_minutes_bonus > 0.0 or row.absence_impact_usage_bonus > 0.0]
-    minutes_affected_rows = [row for row in affected_rows if row.absence_impact_minutes_bonus > 0.0]
-    usage_only_rows = [row for row in affected_rows if row.absence_impact_minutes_bonus <= 0.0 and row.absence_impact_usage_bonus > 0.0]
-    unaffected_rows = [row for row in rows if row.absence_impact_minutes_bonus <= 0.0 and row.absence_impact_usage_bonus <= 0.0]
+    affected_rows = [row for row in rows if _has_absence_impact_bonus(row)]
+    minutes_affected_rows = [row for row in affected_rows if abs(float(row.absence_impact_minutes_bonus or 0.0)) > 0.0001]
+    usage_only_rows = [
+        row
+        for row in affected_rows
+        if abs(float(row.absence_impact_minutes_bonus or 0.0)) <= 0.0001 and abs(float(row.absence_impact_usage_bonus or 0.0)) > 0.0001
+    ]
+    unaffected_rows = [row for row in rows if not _has_absence_impact_bonus(row)]
 
     def _minutes_mae(candidates: list[PregameOpportunityBacktestRow]) -> float:
         values = [float(row.abs_minutes_error) for row in candidates if row.abs_minutes_error is not None]
@@ -1371,4 +1466,475 @@ def backtest_pregame_opportunity(
         notes=notes,
     )
     return PregameOpportunityBacktestResult(summary=summary, rows=rows)
+
+
+def _grade_recommended_stat_pick(row: PregameStatBacktestRow) -> str | None:
+    if not row.line_available or row.recommended_side is None or row.line is None:
+        return None
+    if row.actual_value > row.line:
+        return "win" if row.recommended_side == "OVER" else "loss"
+    if row.actual_value < row.line:
+        return "win" if row.recommended_side == "UNDER" else "loss"
+    return "push"
+
+
+def _backtest_pregame_stat(
+    *,
+    stat_type: str,
+    actual_attr: str,
+    feature_builder: Callable[[Any], Any],
+    projector: Callable[[Any], Any],
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
+    min_history: int = 8,
+    min_expected_minutes: float = 12.0,
+    limit: int | None = None,
+    max_minutes_before_tip: int | None = None,
+    min_minutes_before_tip: int | None = None,
+) -> PregameStatBacktestResult:
+    start_date = start_date or datetime.min
+    end_date = end_date or datetime.max
+
+    target_column = getattr(HistoricalGameLog, actual_attr)
+    with session_scope() as session:
+        target_logs = (
+            session.query(HistoricalGameLog)
+            .filter(
+                HistoricalGameLog.game_date >= start_date,
+                HistoricalGameLog.game_date <= end_date,
+                target_column.is_not(None),
+            )
+            .order_by(HistoricalGameLog.game_date.asc(), HistoricalGameLog.game_id.asc(), HistoricalGameLog.player_id.asc())
+            .all()
+        )
+        all_logs = (
+            session.query(HistoricalGameLog)
+            .filter(target_column.is_not(None))
+            .order_by(HistoricalGameLog.player_id, HistoricalGameLog.game_date, HistoricalGameLog.game_id)
+            .all()
+        )
+        advanced_rows = session.query(HistoricalAdvancedLog).all()
+        rotation_rows = session.query(PlayerRotationGame).all()
+        games = session.query(Game).all()
+        teams = session.query(Team).all()
+        team_defense_rows = session.query(TeamDefensiveStat).all()
+        absence_impact_rows = session.query(AbsenceImpactSummary).all()
+        odds_rows = (
+            session.query(OddsSnapshot)
+            .filter(OddsSnapshot.market_phase == "pregame", OddsSnapshot.stat_type == stat_type)
+            .order_by(OddsSnapshot.captured_at)
+            .all()
+        )
+
+        target_game_ids = sorted({log.game_id for log in target_logs})
+        max_target_datetime = max((_target_context_time(next((game for game in games if game.game_id == log.game_id), None), log) for log in target_logs), default=None)
+        pregame_context_rows = load_pregame_context_snapshot_rows(
+            session,
+            game_ids=target_game_ids,
+            captured_at=max_target_datetime,
+        )
+
+        target_game_dates = sorted({_target_context_time(next((game for game in games if game.game_id == log.game_id), None), log).date() for log in target_logs})
+        injury_entries: list[OfficialInjuryReportEntry] = []
+        if target_game_dates and max_target_datetime is not None:
+            injury_entries = (
+                session.query(OfficialInjuryReportEntry)
+                .filter(
+                    OfficialInjuryReportEntry.game_date.in_(target_game_dates),
+                    OfficialInjuryReportEntry.report_datetime_utc <= max_target_datetime,
+                )
+                .all()
+            )
+
+    games_by_id = {game.game_id: game for game in games}
+    team_id_by_abbreviation = {team.abbreviation: team.team_id for team in teams if team.abbreviation}
+    defense_by_season_team, league_avg_def_rating_by_season, league_avg_pace_by_season, league_avg_opponent_points_by_season = _build_defense_context(team_defense_rows)
+    odds_index = _build_odds_index(odds_rows)
+    pregame_context_index = build_pregame_context_index(pregame_context_rows)
+
+    logs_by_player: dict[str, list[HistoricalGameLog]] = defaultdict(list)
+    logs_by_team: dict[str, list[HistoricalGameLog]] = defaultdict(list)
+    for log in all_logs:
+        logs_by_player[log.player_id].append(log)
+        logs_by_team[log.team].append(log)
+
+    advanced_by_player_game = {(row.player_id, row.game_id): row for row in advanced_rows}
+    rotation_by_player_game = {(row.player_id, row.game_id): row for row in rotation_rows}
+    rotation_by_team_game_player = {(row.team_id, row.game_id, row.player_id): row for row in rotation_rows if row.team_id}
+    injury_rows_by_report_id, injury_report_refs_by_game_date = _build_historical_injury_report_indexes(injury_entries)
+    injury_index_cache: dict[int, Any] = {}
+    team_role_prior_cache: dict[tuple[str, str], Any] = {}
+    absence_impact_index = _build_absence_impact_index(absence_impact_rows)
+
+    rows: list[PregameStatBacktestRow] = []
+    with session_scope() as session:
+        for target in target_logs:
+            target_game = games_by_id.get(target.game_id)
+            target_context_time = _target_context_time(target_game, target)
+            odds_row = _select_latest_pregame_odds_snapshot(
+                odds_index,
+                game_id=target.game_id,
+                player_id=target.player_id,
+                cutoff=target_context_time,
+                max_minutes_before_tip=max_minutes_before_tip,
+                min_minutes_before_tip=min_minutes_before_tip,
+            )
+            request_captured_at = odds_row.captured_at if odds_row is not None else target_context_time
+            injury_index = _select_historical_injury_index(
+                game_date=target_context_time.date(),
+                captured_at=request_captured_at,
+                rows_by_report_id=injury_rows_by_report_id,
+                report_refs_by_game_date=injury_report_refs_by_game_date,
+                index_cache=injury_index_cache,
+            )
+            seed = build_pregame_feature_seed(
+                session,
+                PregameFeatureRequest(
+                    game_id=target.game_id,
+                    player_id=target.player_id,
+                    player_name=target.player_name,
+                    stat_type=stat_type,
+                    captured_at=request_captured_at,
+                    line=float(odds_row.line) if odds_row is not None else 0.0,
+                    over_odds=int(odds_row.over_odds) if odds_row is not None else 0,
+                    under_odds=int(odds_row.under_odds) if odds_row is not None else 0,
+                    game_date=target_context_time,
+                    team_abbreviation=target.team,
+                    opponent_abbreviation=target.opponent,
+                    is_home=target.is_home,
+                ),
+                games_by_id=games_by_id,
+                team_id_by_abbreviation=team_id_by_abbreviation,
+                defense_by_season_team=defense_by_season_team,
+                league_avg_def_rating_by_season=league_avg_def_rating_by_season,
+                league_avg_pace_by_season=league_avg_pace_by_season,
+                league_avg_opponent_points_by_season=league_avg_opponent_points_by_season,
+                pregame_context_index=pregame_context_index,
+                official_injury_index=injury_index,
+                absence_impact_index=absence_impact_index,
+                team_role_prior_cache=team_role_prior_cache,
+                logs_by_player=logs_by_player,
+                advanced_by_player_game=advanced_by_player_game,
+                rotation_by_player_game=rotation_by_player_game,
+                logs_by_team=logs_by_team,
+                rotation_by_team_game_player=rotation_by_team_game_player,
+            )
+            if seed is None or len(seed.recent_logs) < min_history:
+                continue
+
+            features = feature_builder(seed)
+            projection = projector(features)
+            if float(projection.breakdown.to_dict().get("expected_minutes", 0.0)) < min_expected_minutes:
+                continue
+
+            actual_value = float(getattr(target, actual_attr) or 0.0)
+            error = projection.projected_value - actual_value
+            breakdown = projection.breakdown.to_dict()
+            line_value = float(odds_row.line) if odds_row is not None else None
+            line_delta = actual_value - line_value if line_value is not None else None
+            row = PregameStatBacktestRow(
+                game_id=target.game_id,
+                game_date=target.game_date,
+                player_id=target.player_id,
+                player_name=target.player_name,
+                team_abbreviation=target.team,
+                opponent_abbreviation=target.opponent,
+                stat_type=stat_type,
+                projected_value=projection.projected_value,
+                actual_value=actual_value,
+                actual_minutes=float(target.minutes) if target.minutes is not None else None,
+                expected_minutes=float(breakdown.get("expected_minutes", 0.0)) if breakdown.get("expected_minutes") is not None else None,
+                error=_round(error),
+                abs_error=_round(abs(error)),
+                line=line_value,
+                line_available=odds_row is not None,
+                over_probability=float(projection.over_probability),
+                under_probability=float(projection.under_probability),
+                edge_over=float(projection.edge_over),
+                edge_under=float(projection.edge_under),
+                confidence=float(projection.confidence),
+                recommended_side=projection.recommended_side,
+                line_delta=_round(line_delta) if line_delta is not None else None,
+                recommended_outcome=None,
+                pregame_context_attached=bool(features.pregame_context_attached),
+                official_injury_attached=bool(features.official_injury_attached),
+                context_source=features.context_source or "none",
+                absence_impact_sample_confidence=features.absence_impact_sample_confidence,
+                absence_impact_source_count=features.absence_impact_source_count,
+                absence_impact_minutes_bonus=0.0,
+                absence_impact_usage_bonus=0.0,
+                breakdown=breakdown,
+            )
+            row.recommended_outcome = _grade_recommended_stat_pick(row)
+            rows.append(row)
+            if limit is not None and len(rows) >= limit:
+                break
+
+    if not rows:
+        return PregameStatBacktestResult(
+            summary=PregameStatBacktestSummary(
+                stat_type=stat_type,
+                sample_size=0,
+                line_available_count=0,
+                line_available_pct=0.0,
+                line_missing_count=0,
+                line_missing_pct=0.0,
+                pregame_context_attached_count=0,
+                pregame_context_attached_pct=0.0,
+                official_injury_attached_count=0,
+                official_injury_attached_pct=0.0,
+                mae=0.0,
+                rmse=0.0,
+                bias=0.0,
+                median_abs_error=0.0,
+                recommendation_count=0,
+                hit_rate=0.0,
+                largest_misses=[],
+                notes=[f"No eligible historical {stat_type} rows were found for the requested backtest window."],
+            ),
+            rows=[],
+        )
+
+    signed_errors = [row.error for row in rows]
+    absolute_errors = [row.abs_error for row in rows]
+    line_available_count = sum(1 for row in rows if row.line_available)
+    pregame_context_attached_count = sum(1 for row in rows if row.pregame_context_attached)
+    official_injury_attached_count = sum(1 for row in rows if row.official_injury_attached)
+    graded_rows = [row for row in rows if row.recommended_outcome in {"win", "loss"}]
+    recommendation_count = sum(1 for row in rows if row.recommended_side is not None)
+
+    largest_misses = [
+        {
+            "game_id": row.game_id,
+            "game_date": row.game_date.isoformat(),
+            "player_name": row.player_name,
+            "team_abbreviation": row.team_abbreviation,
+            "opponent_abbreviation": row.opponent_abbreviation,
+            "projected_value": row.projected_value,
+            "actual_value": row.actual_value,
+            "line": row.line,
+            "error": row.error,
+            "abs_error": row.abs_error,
+            "confidence": row.confidence,
+            "context_source": row.context_source,
+        }
+        for row in sorted(rows, key=lambda item: item.abs_error, reverse=True)[:10]
+    ]
+    notes = [f"{stat_type.title()} backtest excludes players whose projected pregame role stayed below {min_expected_minutes:.1f} expected minutes."]
+
+    return PregameStatBacktestResult(
+        summary=PregameStatBacktestSummary(
+            stat_type=stat_type,
+            sample_size=len(rows),
+            line_available_count=line_available_count,
+            line_available_pct=_round(line_available_count / len(rows)),
+            line_missing_count=len(rows) - line_available_count,
+            line_missing_pct=_round((len(rows) - line_available_count) / len(rows)),
+            pregame_context_attached_count=pregame_context_attached_count,
+            pregame_context_attached_pct=_round(pregame_context_attached_count / len(rows)),
+            official_injury_attached_count=official_injury_attached_count,
+            official_injury_attached_pct=_round(official_injury_attached_count / len(rows)),
+            mae=_round(mean(absolute_errors)),
+            rmse=_round(sqrt(mean(error ** 2 for error in signed_errors))),
+            bias=_round(mean(signed_errors)),
+            median_abs_error=_round(median(absolute_errors)),
+            recommendation_count=recommendation_count,
+            hit_rate=_round(sum(1 for row in graded_rows if row.recommended_outcome == "win") / len(graded_rows)) if graded_rows else 0.0,
+            largest_misses=largest_misses,
+            notes=notes,
+        ),
+        rows=rows,
+    )
+
+
+def backtest_pregame_rebounds(
+    *,
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
+    min_history: int = 8,
+    min_expected_minutes: float = 12.0,
+    limit: int | None = None,
+    max_minutes_before_tip: int | None = None,
+    min_minutes_before_tip: int | None = None,
+) -> PregameReboundsBacktestResult:
+    return _backtest_pregame_stat(
+        stat_type="rebounds",
+        actual_attr="rebounds",
+        feature_builder=build_pregame_rebounds_features_from_seed,
+        projector=project_pregame_rebounds,
+        start_date=start_date,
+        end_date=end_date,
+        min_history=min_history,
+        min_expected_minutes=min_expected_minutes,
+        limit=limit,
+        max_minutes_before_tip=max_minutes_before_tip,
+        min_minutes_before_tip=min_minutes_before_tip,
+    )
+
+
+def backtest_pregame_assists(
+    *,
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
+    min_history: int = 8,
+    min_expected_minutes: float = 12.0,
+    limit: int | None = None,
+    max_minutes_before_tip: int | None = None,
+    min_minutes_before_tip: int | None = None,
+) -> PregameAssistsBacktestResult:
+    return _backtest_pregame_stat(
+        stat_type="assists",
+        actual_attr="assists",
+        feature_builder=build_pregame_assists_features_from_seed,
+        projector=project_pregame_assists,
+        start_date=start_date,
+        end_date=end_date,
+        min_history=min_history,
+        min_expected_minutes=min_expected_minutes,
+        limit=limit,
+        max_minutes_before_tip=max_minutes_before_tip,
+        min_minutes_before_tip=min_minutes_before_tip,
+    )
+
+
+def backtest_pregame_threes(
+    *,
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
+    min_history: int = 8,
+    min_expected_minutes: float = 12.0,
+    limit: int | None = None,
+    max_minutes_before_tip: int | None = None,
+    min_minutes_before_tip: int | None = None,
+) -> PregameThreesBacktestResult:
+    return _backtest_pregame_stat(
+        stat_type="threes",
+        actual_attr="threes_made",
+        feature_builder=build_pregame_threes_features_from_seed,
+        projector=project_pregame_threes,
+        start_date=start_date,
+        end_date=end_date,
+        min_history=min_history,
+        min_expected_minutes=min_expected_minutes,
+        limit=limit,
+        max_minutes_before_tip=max_minutes_before_tip,
+        min_minutes_before_tip=min_minutes_before_tip,
+    )
+
+
+def _row_projected_value(row: PregamePointsBacktestRow | PregameStatBacktestRow) -> float:
+    return float(getattr(row, "projected_value", getattr(row, "projected_points", 0.0)))
+
+
+def _row_actual_value(row: PregamePointsBacktestRow | PregameStatBacktestRow) -> float:
+    return float(getattr(row, "actual_value", getattr(row, "actual_points", 0.0)))
+
+
+def _row_line_value(row: PregamePointsBacktestRow | PregameStatBacktestRow) -> float | None:
+    line = getattr(row, "line", None)
+    return float(line) if line is not None else None
+
+
+def compute_calibration_curve(
+    rows: list[PregamePointsBacktestRow] | list[PregameStatBacktestRow],
+    n_bins: int = 10,
+) -> list[dict[str, float | int | None]]:
+    if n_bins <= 0:
+        raise ValueError("n_bins must be positive")
+
+    buckets: list[list[PregamePointsBacktestRow | PregameStatBacktestRow]] = [[] for _ in range(n_bins)]
+    for row in rows:
+        confidence = max(0.0, min(float(getattr(row, "confidence", 0.0) or 0.0), 0.999999))
+        bucket_index = min(int(confidence * n_bins), n_bins - 1)
+        buckets[bucket_index].append(row)
+
+    curve: list[dict[str, float | int | None]] = []
+    for index, bucket in enumerate(buckets):
+        lower = index / n_bins
+        upper = (index + 1) / n_bins
+        line_rows = [row for row in bucket if getattr(row, "line_available", False) and _row_line_value(row) is not None]
+        closer_count = 0
+        for row in line_rows:
+            projected_error = abs(_row_projected_value(row) - _row_actual_value(row))
+            line_error = abs(float(_row_line_value(row) or 0.0) - _row_actual_value(row))
+            if projected_error < line_error:
+                closer_count += 1
+
+        graded_recommendations = [
+            row
+            for row in bucket
+            if getattr(row, "recommended_side", None) is not None
+            and getattr(row, "recommended_outcome", None) in {"win", "loss"}
+        ]
+        recommendation_hit_rate = (
+            _round(
+                sum(
+                    1
+                    for row in graded_recommendations
+                    if getattr(row, "recommended_outcome", None) == "win"
+                ) / len(graded_recommendations)
+            )
+            if graded_recommendations
+            else None
+        )
+
+        curve.append(
+            {
+                "bin_label": f"{lower:.1f}-{upper:.1f}",
+                "sample_count": len(bucket),
+                "line_sample_count": len(line_rows),
+                "mean_confidence": _round(mean(float(getattr(row, "confidence", 0.0) or 0.0) for row in bucket)) if bucket else 0.0,
+                "actual_hit_rate": _round(closer_count / len(line_rows)) if line_rows else None,
+                "recommendation_hit_rate": recommendation_hit_rate,
+                "recommendation_count": len(graded_recommendations),
+            }
+        )
+    return curve
+
+
+def analyze_recommendation_thresholds(
+    rows: list[PregamePointsBacktestRow] | list[PregameStatBacktestRow],
+    edge_thresholds: list[float] = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0],
+    confidence_thresholds: list[float] = [0.50, 0.55, 0.60, 0.65, 0.70],
+) -> list[dict[str, float | int | None | str]]:
+    analyses: list[dict[str, float | int | None | str]] = []
+    line_rows = [row for row in rows if getattr(row, "line_available", False) and _row_line_value(row) is not None]
+    for edge_threshold in edge_thresholds:
+        for confidence_threshold in confidence_thresholds:
+            qualified_rows: list[tuple[PregamePointsBacktestRow | PregameStatBacktestRow, str, float]] = []
+            for row in line_rows:
+                confidence = float(getattr(row, "confidence", 0.0) or 0.0)
+                if confidence < confidence_threshold:
+                    continue
+                line = float(_row_line_value(row) or 0.0)
+                projected_value = _row_projected_value(row)
+                signed_edge = projected_value - line
+                if abs(signed_edge) < edge_threshold:
+                    continue
+                side = "OVER" if signed_edge >= 0 else "UNDER"
+                qualified_rows.append((row, side, abs(signed_edge)))
+
+            graded_rows = []
+            for row, side, edge in qualified_rows:
+                actual_value = _row_actual_value(row)
+                line = float(_row_line_value(row) or 0.0)
+                if actual_value == line:
+                    continue
+                hit = actual_value > line if side == "OVER" else actual_value < line
+                graded_rows.append((row, edge, hit))
+
+            analyses.append(
+                {
+                    "edge_threshold": edge_threshold,
+                    "confidence_threshold": confidence_threshold,
+                    "qualified_count": len(qualified_rows),
+                    "graded_count": len(graded_rows),
+                    "hit_rate": _round(sum(1 for _, _, hit in graded_rows if hit) / len(graded_rows)) if graded_rows else None,
+                    "average_edge": _round(mean(edge for _, edge, _ in graded_rows)) if graded_rows else 0.0,
+                    "average_actual_error": _round(
+                        mean(abs(_row_projected_value(row) - _row_actual_value(row)) for row, _, _ in graded_rows)
+                    ) if graded_rows else 0.0,
+                }
+            )
+    return analyses
 

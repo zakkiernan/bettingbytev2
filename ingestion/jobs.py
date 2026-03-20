@@ -13,6 +13,7 @@ from api.services.stats_signal_service import (
 from database.db import init_db
 from ingestion.fanduel_client import fetch_current_prop_board
 from ingestion.injury_reports import (
+    backfill_injury_entry_player_ids as backfill_injury_entry_player_ids_impl,
     backfill_official_injury_reports as backfill_official_injury_reports_impl,
     build_injury_report_url,
     sync_official_injury_report as sync_official_injury_report_impl,
@@ -195,6 +196,7 @@ def _sync_prop_snapshot_phase_impl(snapshot_phase: str, run_id: int | None = Non
     write_players(_players_from_rows(props))
     write_sportsbook_event_mappings(event_mappings)
     write_prop_snapshot(props, is_live=False, snapshot_phase=snapshot_phase)
+    write_odds_snapshot(props, market_phase=snapshot_phase)
 
     return {
         "snapshot_phase": snapshot_phase,
@@ -210,6 +212,38 @@ def sync_prop_snapshot_phase(snapshot_phase: str) -> dict[str, Any]:
     if snapshot_phase not in PREGAME_PROP_SNAPSHOT_PHASES and snapshot_phase != "current":
         raise ValueError(f"Unsupported prop snapshot phase: {snapshot_phase}")
     return _run_logged_job(f"sync_prop_snapshot_{snapshot_phase}", _sync_prop_snapshot_phase_impl, snapshot_phase)
+
+
+def _sync_odds_accumulation_impl(run_id: int | None = None) -> dict[str, Any]:
+    _sync_reference_entities_impl(run_id=run_id)
+
+    board = fetch_current_prop_board()
+    props = board["props"]
+    event_mappings = board["event_mappings"]
+    payloads = board.get("payloads", [])
+    unmapped_events = sum(1 for mapping in event_mappings if not mapping.get("nba_game_id"))
+
+    schedule_games_today, schedule_payloads_today = get_todays_games_bundle()
+    schedule_games_tomorrow, schedule_payloads_tomorrow = get_todays_games_bundle(date.today() + timedelta(days=1))
+
+    write_source_payloads(payloads + schedule_payloads_today + schedule_payloads_tomorrow)
+    write_games(schedule_games_today + schedule_games_tomorrow)
+    write_players(_players_from_rows(props))
+    write_sportsbook_event_mappings(event_mappings)
+    write_odds_snapshot(props, market_phase="accumulation")
+
+    return {
+        "props": len(props),
+        "event_mappings": len(event_mappings),
+        "unmapped_events": unmapped_events,
+        "raw_payloads": len(payloads) + len(schedule_payloads_today) + len(schedule_payloads_tomorrow),
+        "schedule_games": len(schedule_games_today) + len(schedule_games_tomorrow),
+        "market_phase": "accumulation",
+    }
+
+
+def sync_odds_accumulation() -> dict[str, Any]:
+    return _run_logged_job("sync_odds_accumulation", _sync_odds_accumulation_impl)
 
 def _sync_pregame_markets_impl(run_id: int | None = None) -> dict[str, int]:
     _sync_reference_entities_impl(run_id=run_id)
@@ -882,6 +916,17 @@ def backfill_official_injury_reports(
         end_date,
         report_times,
         delay_seconds,
+    )
+
+
+def _backfill_injury_entry_player_ids_impl(run_id: int | None = None) -> dict[str, Any]:
+    return backfill_injury_entry_player_ids_impl()
+
+
+def backfill_injury_entry_player_ids() -> dict[str, Any]:
+    return _run_logged_job(
+        "backfill_injury_entry_player_ids",
+        _backfill_injury_entry_player_ids_impl,
     )
 
 

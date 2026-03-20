@@ -15,10 +15,18 @@ from analytics.absence_impact import (
 )
 from analytics.diagnostics import analyze_pregame_opportunity_misses, analyze_pregame_points_misses
 from analytics.evaluation import (
+    PregameAssistsBacktestResult,
     PregameOpportunityBacktestResult,
     PregamePointsBacktestResult,
+    PregameReboundsBacktestResult,
+    PregameThreesBacktestResult,
+    analyze_recommendation_thresholds,
+    backtest_pregame_assists,
     backtest_pregame_opportunity,
     backtest_pregame_points,
+    backtest_pregame_rebounds,
+    backtest_pregame_threes,
+    compute_calibration_curve,
     summarize_opportunity_absence_impact,
     summarize_points_absence_impact,
 )
@@ -117,6 +125,8 @@ def build_pregame_points_evaluation_report(*, start_date: datetime | None = None
         "summary": result.summary,
         "miss_analysis": miss_analysis,
         "absence_impact_analysis": absence_impact_analysis,
+        "calibration_curve": compute_calibration_curve(result.rows),
+        "recommendation_threshold_analysis": analyze_recommendation_thresholds(result.rows),
         "row_count": len(result.rows),
     }
 
@@ -129,6 +139,36 @@ def build_pregame_opportunity_evaluation_report(*, start_date: datetime | None =
         "summary": result.summary,
         "miss_analysis": miss_analysis,
         "absence_impact_analysis": absence_impact_analysis,
+        "row_count": len(result.rows),
+    }
+
+
+def build_pregame_rebounds_evaluation_report(*, start_date: datetime | None = None, end_date: datetime | None = None, min_history: int = 8, limit: int | None = None) -> dict[str, object]:
+    result = backtest_pregame_rebounds(start_date=start_date, end_date=end_date, min_history=min_history, limit=limit)
+    return {
+        "summary": result.summary,
+        "calibration_curve": compute_calibration_curve(result.rows),
+        "recommendation_threshold_analysis": analyze_recommendation_thresholds(result.rows),
+        "row_count": len(result.rows),
+    }
+
+
+def build_pregame_assists_evaluation_report(*, start_date: datetime | None = None, end_date: datetime | None = None, min_history: int = 8, limit: int | None = None) -> dict[str, object]:
+    result = backtest_pregame_assists(start_date=start_date, end_date=end_date, min_history=min_history, limit=limit)
+    return {
+        "summary": result.summary,
+        "calibration_curve": compute_calibration_curve(result.rows),
+        "recommendation_threshold_analysis": analyze_recommendation_thresholds(result.rows),
+        "row_count": len(result.rows),
+    }
+
+
+def build_pregame_threes_evaluation_report(*, start_date: datetime | None = None, end_date: datetime | None = None, min_history: int = 8, limit: int | None = None) -> dict[str, object]:
+    result = backtest_pregame_threes(start_date=start_date, end_date=end_date, min_history=min_history, limit=limit)
+    return {
+        "summary": result.summary,
+        "calibration_curve": compute_calibration_curve(result.rows),
+        "recommendation_threshold_analysis": analyze_recommendation_thresholds(result.rows),
         "row_count": len(result.rows),
     }
 

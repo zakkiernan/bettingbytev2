@@ -1,35 +1,85 @@
 import type { ReactNode } from "react";
-
+import { Suspense } from "react";
 import Link from "next/link";
 import { Bolt, ChevronRight } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
-import { dashboardMetrics, primaryNavigation, quickLinks } from "@/lib/navigation";
+import { primaryNavigation, quickLinks } from "@/lib/navigation";
+import { fetchHealth, fetchGamesToday } from "@/lib/api";
 import { cn } from "@/lib/utils";
+
+async function HeaderMetrics() {
+  try {
+    const [health, games] = await Promise.all([fetchHealth(), fetchGamesToday()]);
+
+    const totalEdges = games.reduce((sum, g) => sum + g.edge_count, 0);
+    const stale = health.lines.stale_captures;
+
+    return (
+      <div className="flex items-center gap-4">
+        <MetricPill label="Games" value={String(games.length)} />
+        <MetricPill label="Props" value={String(health.lines.tonight_prop_count)} />
+        <MetricPill
+          label={stale > 0 ? "Stale" : "Edges"}
+          value={String(stale > 0 ? stale : totalEdges)}
+          warn={stale > 0}
+        />
+      </div>
+    );
+  } catch {
+    return (
+      <div className="rounded-lg border border-[color:var(--color-warning)]/30 bg-[color:var(--color-warning-muted)] px-3 py-1.5">
+        <p className="text-xs text-[color:var(--color-warning)]">API offline</p>
+      </div>
+    );
+  }
+}
+
+function MetricPill({
+  label,
+  value,
+  warn,
+}: {
+  label: string;
+  value: string;
+  warn?: boolean;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-xs text-[color:var(--color-text-muted)]">{label}</span>
+      <span
+        className={cn(
+          "font-mono text-sm font-semibold",
+          warn ? "text-[color:var(--color-warning)]" : "text-[color:var(--color-text-primary)]",
+        )}
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
 
 export function AppShell({ children }: { children: ReactNode }) {
   return (
-    <div className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(124,92,252,0.18),_transparent_28%),linear-gradient(180deg,_#0b0e17_0%,_#0f1320_45%,_#0b0e17_100%)] text-[color:var(--text-primary)]">
-      <div className="mx-auto grid min-h-screen max-w-[1500px] grid-cols-1 md:grid-cols-[280px_minmax(0,1fr)]">
-        <aside className="hidden border-r border-[color:var(--border-default)]/70 bg-[color:var(--bg-surface)]/70 p-6 backdrop-blur md:flex md:flex-col">
-          <div className="mb-8 flex items-center gap-3">
-            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-[color:var(--brand-glow)] text-[color:var(--brand-subtle)]">
-              <Bolt className="h-5 w-5" />
+    <div className="min-h-screen bg-[color:var(--color-background)] text-[color:var(--color-text-primary)]">
+      <div className="mx-auto grid min-h-screen max-w-[1440px] grid-cols-1 md:grid-cols-[240px_minmax(0,1fr)]">
+        {/* Sidebar */}
+        <aside className="hidden border-r border-[color:var(--color-border-subtle)] bg-[color:var(--color-surface)] md:flex md:flex-col">
+          <div className="flex items-center gap-3 border-b border-[color:var(--color-border-subtle)] px-5 py-4">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[color:var(--color-accent-muted)] text-[color:var(--color-accent)]">
+              <Bolt className="h-4 w-4" />
             </div>
             <div>
-              <p className="text-xs uppercase tracking-[0.22em] text-[color:var(--text-tertiary)]">BettingByte</p>
-              <p className="font-semibold">Data Terminal</p>
+              <p className="text-sm font-semibold">BettingByte</p>
             </div>
           </div>
 
-          <nav className="space-y-2">
+          <nav className="flex-1 space-y-0.5 px-3 py-3">
             {primaryNavigation.map(({ href, label, icon: Icon }) => (
               <Link
                 key={href}
                 href={href}
-                className={cn(
-                  "flex items-center gap-3 rounded-2xl border border-transparent px-4 py-3 text-sm text-[color:var(--text-secondary)] transition-colors hover:border-[color:var(--border-hover)] hover:bg-[color:var(--bg-surface-alt)] hover:text-[color:var(--text-primary)]",
-                )}
+                className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm text-[color:var(--color-text-secondary)] transition-colors hover:bg-[color:var(--color-surface-elevated)] hover:text-[color:var(--color-text-primary)]"
               >
                 <Icon className="h-4 w-4" />
                 <span>{label}</span>
@@ -37,56 +87,58 @@ export function AppShell({ children }: { children: ReactNode }) {
             ))}
           </nav>
 
-          <div className="mt-8 space-y-4 rounded-[1.5rem] border border-[color:var(--border-default)] bg-[color:var(--bg-surface-alt)]/70 p-5">
+          <div className="mx-3 mb-3 space-y-2 rounded-lg border border-[color:var(--color-border-subtle)] p-3">
             <div className="flex items-center justify-between">
-              <p className="text-sm font-semibold">Quick Links</p>
-              <Badge tone="live">Build</Badge>
+              <p className="text-xs font-medium text-[color:var(--color-text-muted)]">Quick Links</p>
             </div>
-            <div className="space-y-2">
-              {quickLinks.map((link) => (
-                <Link key={link.href} href={link.href} className="flex items-center justify-between rounded-xl px-3 py-2 text-sm text-[color:var(--text-secondary)] transition-colors hover:bg-[color:var(--bg-surface)] hover:text-[color:var(--text-primary)]">
-                  <span>{link.label}</span>
-                  <ChevronRight className="h-4 w-4" />
-                </Link>
-              ))}
-            </div>
+            {quickLinks.map((link) => (
+              <Link
+                key={link.href}
+                href={link.href}
+                className="flex items-center justify-between rounded-md px-2 py-1.5 text-xs text-[color:var(--color-text-secondary)] transition-colors hover:bg-[color:var(--color-surface-elevated)] hover:text-[color:var(--color-text-primary)]"
+              >
+                <span>{link.label}</span>
+                <ChevronRight className="h-3 w-3" />
+              </Link>
+            ))}
           </div>
         </aside>
 
+        {/* Main content area */}
         <div className="flex min-h-screen flex-col">
-          <header className="sticky top-0 z-20 border-b border-[color:var(--border-default)]/70 bg-[color:var(--bg-base)]/90 px-4 py-4 backdrop-blur md:px-8">
-            <div className="flex flex-col gap-4">
-              <div className="flex items-center justify-between gap-4">
-                <div>
-                  <p className="text-xs uppercase tracking-[0.22em] text-[color:var(--text-tertiary)]">NBA points only</p>
-                  <h1 className="text-xl font-semibold md:text-2xl">BettingByte v2 frontend shell</h1>
-                </div>
-                <Badge>Dark-first</Badge>
-              </div>
-
-              <div className="grid grid-cols-3 gap-3 overflow-x-auto md:max-w-xl">
-                {dashboardMetrics.map(({ label, value, icon: Icon }) => (
-                  <div key={label} className="rounded-2xl border border-[color:var(--border-default)] bg-[color:var(--bg-surface)]/70 p-3">
-                    <div className="flex items-center justify-between text-[color:var(--text-secondary)]">
-                      <span className="text-xs uppercase tracking-[0.18em]">{label}</span>
-                      <Icon className="h-4 w-4" />
-                    </div>
-                    <p className="mt-2 font-mono text-2xl font-bold text-[color:var(--text-primary)]">{value}</p>
-                  </div>
-                ))}
-              </div>
-
-              <div className="flex gap-2 overflow-x-auto md:hidden">
-                {primaryNavigation.map(({ href, label }) => (
-                  <Link key={href} href={href} className="rounded-full border border-[color:var(--border-default)] bg-[color:var(--bg-surface)] px-3 py-2 text-sm text-[color:var(--text-secondary)] transition-colors hover:text-[color:var(--text-primary)]">
-                    {label}
-                  </Link>
-                ))}
-              </div>
+          <header className="sticky top-0 z-20 flex items-center justify-between border-b border-[color:var(--color-border-subtle)] bg-[color:var(--color-background)]/95 px-4 py-3 backdrop-blur-sm md:px-6">
+            <div className="flex items-center gap-4">
+              <h1 className="text-sm font-semibold">BettingByte</h1>
+              <Badge>Internal</Badge>
             </div>
+
+            <Suspense
+              fallback={
+                <div className="flex items-center gap-4">
+                  {Array.from({ length: 3 }).map((_, i) => (
+                    <div key={i} className="h-4 w-16 animate-pulse rounded bg-[color:var(--color-surface-elevated)]" />
+                  ))}
+                </div>
+              }
+            >
+              <HeaderMetrics />
+            </Suspense>
           </header>
 
-          <main className="flex-1 px-4 py-6 md:px-8 md:py-8">{children}</main>
+          {/* Mobile nav */}
+          <div className="flex gap-1 overflow-x-auto border-b border-[color:var(--color-border-subtle)] px-4 md:hidden">
+            {primaryNavigation.map(({ href, label }) => (
+              <Link
+                key={href}
+                href={href}
+                className="whitespace-nowrap px-3 py-2.5 text-sm text-[color:var(--color-text-secondary)] transition-colors hover:text-[color:var(--color-text-primary)]"
+              >
+                {label}
+              </Link>
+            ))}
+          </div>
+
+          <main className="flex-1 px-4 py-6 md:px-6 md:py-6">{children}</main>
         </div>
       </div>
     </div>

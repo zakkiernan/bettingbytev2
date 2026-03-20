@@ -109,6 +109,58 @@ class OfficialInjuryReportLoaderTests(unittest.TestCase):
         self.assertIsNotNone(match)
         self.assertEqual(match["player_id"], "203932")
 
+    def test_match_falls_back_to_alias_name_order_variant(self):
+        rows = [
+            {
+                "game_date": date(2026, 3, 12),
+                "team_abbreviation": "POR",
+                "player_id": "1642905",
+                "player_name": "Yang Hansen",
+                "current_status": "Out",
+                "reason": "Injury/Illness - Ankle",
+                "report_datetime_utc": datetime(2026, 3, 12, 17, 0, 0),
+                "report_submitted": True,
+            }
+        ]
+
+        index = build_official_injury_report_index(rows)
+        match = match_official_injury_row(
+            index,
+            game_date=date(2026, 3, 12),
+            player_id=None,
+            team_abbreviation="POR",
+            player_name="Hansen Yang",
+        )
+
+        self.assertIsNotNone(match)
+        self.assertEqual(match["player_id"], "1642905")
+
+    def test_match_falls_back_to_unique_last_name_for_team(self):
+        rows = [
+            {
+                "game_date": date(2026, 3, 12),
+                "team_abbreviation": "LAL",
+                "player_id": "2544",
+                "player_name": "LeBron James",
+                "current_status": "Questionable",
+                "reason": "Injury/Illness - Ankle",
+                "report_datetime_utc": datetime(2026, 3, 12, 17, 0, 0),
+                "report_submitted": True,
+            }
+        ]
+
+        index = build_official_injury_report_index(rows)
+        match = match_official_injury_row(
+            index,
+            game_date=date(2026, 3, 12),
+            player_id=None,
+            team_abbreviation="LAL",
+            player_name="James",
+        )
+
+        self.assertIsNotNone(match)
+        self.assertEqual(match["player_id"], "2544")
+
 
 class OfficialInjuryOpportunityFeatureTests(unittest.TestCase):
     def test_official_injury_aggregates_map_status_and_team_counts(self):
@@ -319,6 +371,56 @@ class OfficialInjuryOpportunityFeatureTests(unittest.TestCase):
         self.assertAlmostEqual(aggregates["absence_impact_usage_delta"], 0.018)
         self.assertAlmostEqual(aggregates["absence_impact_touches_delta"], 4.8)
         self.assertAlmostEqual(aggregates["absence_impact_passes_delta"], 2.4)
+        self.assertAlmostEqual(aggregates["absence_impact_sample_confidence"], 0.6)
+        self.assertEqual(aggregates["absence_impact_source_count"], 1.0)
+
+    def test_absence_impact_context_preserves_negative_empirical_deltas(self):
+        absence_index = _build_absence_impact_index([
+            SimpleNamespace(
+                team_abbreviation="BOS",
+                beneficiary_player_id="1",
+                beneficiary_player_name="Target Player",
+                source_player_id="2",
+                source_player_name="Source Star",
+                window_end_date=date(2026, 3, 10),
+                minutes_delta=-4.0,
+                usage_delta=-0.025,
+                touches_delta=-6.0,
+                passes_delta=-3.0,
+                impact_score=1.8,
+                sample_confidence=0.6,
+                source_out_game_count=4,
+                updated_at=datetime(2026, 3, 10, 12, 0, 0),
+                created_at=datetime(2026, 3, 10, 12, 0, 0),
+            )
+        ])
+
+        aggregates = _build_official_injury_aggregates(
+            None,
+            {
+                "out_count": 1,
+                "doubtful_count": 0,
+                "questionable_count": 0,
+                "report_datetime_utc": datetime(2026, 3, 12, 17, 0, 0),
+            },
+            team_rows=[
+                {
+                    "player_id": "2",
+                    "player_name": "Source Star",
+                    "current_status": "OUT",
+                    "report_datetime_utc": datetime(2026, 3, 12, 17, 0, 0),
+                }
+            ],
+            player_id="1",
+            team_abbreviation="BOS",
+            absence_impact_index=absence_index,
+            captured_at=datetime(2026, 3, 12, 18, 0, 0),
+        )
+
+        self.assertAlmostEqual(aggregates["absence_impact_minutes_delta"], -2.4)
+        self.assertAlmostEqual(aggregates["absence_impact_usage_delta"], -0.015)
+        self.assertAlmostEqual(aggregates["absence_impact_touches_delta"], -3.6)
+        self.assertAlmostEqual(aggregates["absence_impact_passes_delta"], -1.8)
         self.assertAlmostEqual(aggregates["absence_impact_sample_confidence"], 0.6)
         self.assertEqual(aggregates["absence_impact_source_count"], 1.0)
 

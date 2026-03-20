@@ -7,14 +7,18 @@ from statistics import NormalDist
 from typing import Any
 
 from analytics.features_pregame import PregamePointsFeatures, build_pregame_points_features
-from analytics.opportunity_model import project_pregame_opportunity
+from analytics.opportunity_model import (
+    PregameOpportunityModelConfig,
+    PregameOpportunityProjection,
+    project_pregame_opportunity,
+)
 from ingestion.writer import write_model_signals
 
 MODEL_NAME = "pregame_points_baseline"
 MODEL_VERSION = "v3"
-MIN_EDGE_TO_RECOMMEND = 1.0
+MIN_EDGE_TO_RECOMMEND = 1.5
 MIN_PROBABILITY_TO_RECOMMEND = 0.54
-MIN_CONFIDENCE_TO_RECOMMEND = 0.58
+MIN_CONFIDENCE_TO_RECOMMEND = 0.65
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,8 +28,8 @@ class PregamePointsModelConfig:
         (0.30, "last10_points_avg", "last10_minutes_avg"),
         (0.20, "last5_points_avg", "last5_minutes_avg"),
     )
-    ppm_regression_target: float = 0.67
-    ppm_regression_factor: float = 0.90
+    ppm_regression_target: float = 0.42
+    ppm_regression_factor: float = 0.80
     ppm_floor: float = 0.35
     ppm_ceiling: float = 1.15
     recent_form_last5_factor: float = 0.18
@@ -44,7 +48,7 @@ class PregamePointsModelConfig:
     opponent_clamp: float = 1.1
     pace_factor: float = 0.16
     pace_clamp: float = 1.6
-    home_bonus: float = 0.30
+    home_bonus: float = 0.0
     back_to_back_penalty: float = 0.65
     rest_bonus_per_day: float = 0.12
     rest_bonus_max_days: int = 2
@@ -181,8 +185,18 @@ def _clamp(value: float, lower: float, upper: float) -> float:
 
 
 
-def project_pregame_points(features: PregamePointsFeatures, config: PregamePointsModelConfig = DEFAULT_CONFIG) -> PregamePointsProjection:
-    opportunity_projection = project_pregame_opportunity(features)
+def project_pregame_points(
+    features: PregamePointsFeatures,
+    config: PregamePointsModelConfig = DEFAULT_CONFIG,
+    *,
+    opportunity_config: PregameOpportunityModelConfig | None = None,
+    opportunity_projection: PregameOpportunityProjection | None = None,
+) -> PregamePointsProjection:
+    if opportunity_projection is None:
+        opportunity_projection = project_pregame_opportunity(
+            features,
+            config=opportunity_config or PregameOpportunityModelConfig(),
+        ) if opportunity_config is not None else project_pregame_opportunity(features)
     opportunity = opportunity_projection.breakdown
 
     expected_minutes = opportunity.expected_minutes

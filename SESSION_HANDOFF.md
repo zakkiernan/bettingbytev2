@@ -1,100 +1,184 @@
-# Session Handoff
+# SESSION_HANDOFF.md
 
-Date: 2026-03-12
-Repo: `E:\dev\projects\bettingbyte-v2`
+## Session Date
+2026-03-18
 
-## What Was Completed This Session
-- Continued Phase 4 opportunity work.
-- Added official NBA injury-report PDF ingestion and normalization.
-- Backfilled historical official injury snapshots into the local DB.
-- Wired official injury context into runtime opportunity feature construction.
-- Wired official injury context into the historical opportunity backtest path.
-- Fixed the historical evaluator so it selects the latest official report before tip using canonical game times.
-- Added coverage metrics for official injury context inside opportunity backtests and diagnostics.
-- Identified that generic team-level injury counts were degrading opportunity quality when treated as player-role signals.
-- Fixed the injury feature semantics so official team summaries no longer fabricate `teammate_out_count_top7/top9` values.
-- Removed the generic team-injury-to-minutes bonus from the opportunity model.
-- Re-ran diagnostics and backtests after the semantic fix.
-- Updated project docs to reflect current Phase 4 status and next steps.
+## Current Priority
 
-## Files Added / Changed That Matter Most
-- `PROJECT_STATE.md`
-- `SESSION_HANDOFF.md`
-- `ingestion/injury_reports.py`
-- `analytics/injury_report_loader.py`
-- `analytics/features_opportunity.py`
-- `analytics/opportunity_model.py`
-- `analytics/evaluation.py`
-- `analytics/diagnostics.py`
-- `tests/test_injury_reports.py`
-- `tests/test_injury_report_loader.py`
-- `tests/test_evaluation.py`
+Pregame reliability is still the priority. Frontend stays frozen. Live-model work stays blocked until pregame readiness, auditability, and historical line coverage are stronger.
 
-## Current Safe Understanding
-- Phase 1 is complete.
-- Phase 2 is complete.
-- Phase 3 is complete.
-- Phase 4 is in progress.
-- Runtime rotation ingestion is scraper-backed, not `GameRotation`-backed.
-- The local rotation pipeline is stable.
-- Historical official NBA injury data is now stored and queryable from `2025-12-22` forward, with source-side gaps outside that range.
-- Opportunity diagnostics/backtests now reflect the live injury-aware architecture.
-- Official team-level injury summaries should be treated as weak context only.
-- Strong opportunity adjustments should come from player-specific status and true vacated-role signals.
+## What Was Completed
 
-## Current Metrics Snapshot
-- `rotation_games`: `948`
-- `rotation_coverage_pct`: `99.27`
-- `official_injury_reports`: `600`
-- `official_injury_report_entries`: `78181`
-- Opportunity backtest window: `2026-01-01` through `2026-03-12`
-- Opportunity sample size: `9064`
-- Minutes MAE: `4.9556`
-- Minutes RMSE: `6.4431`
-- Minutes bias: `0.1252`
-- Official injury player match pct: `0.0190`
-- Official injury team-context pct: `0.3641`
+### 1. Fixed the highest-value stat-model biases
 
-## Known Source Gaps
-The following games are currently missing from `nbarotations.info` and are intentionally quarantined as `source_missing_game`:
-- `0022500314` - CHI at ORL on 2025-12-01
-- `0022500523` - LAL at SAS on 2026-01-07
-- `0022500576` - NYK at SAC on 2026-01-14
-- `0022500581` - OKC at HOU on 2026-01-15
-- `0022500595` - IND at DET on 2026-01-17
-- `0022500620` - CLE at CHA on 2026-01-21
-- `0022500753` - GSW at LAL on 2026-02-07
+#### Rebounds
+- Old state: `MAE 2.1636`, `bias +1.1736`
+- New state: `MAE 1.8497`, `bias -0.0148`
 
-These pages return site-level not-found content and no `displayGame(...)` payloads.
+Applied in `analytics/rebounds_model.py`:
+- much lower RPM regression target
+- removed the automatic home bump
+- increased back-to-back penalty
+- removed the frontcourt replacement auto-bonus
+- zeroed the opponent rebound bonus
+- reduced rebound-rate trend pressure
 
-## Verification Completed
-- `E:\dev\projects\bettingbyte-v2\.venv\Scripts\python.exe -m unittest discover tests -v`
-- `E:\dev\projects\bettingbyte-v2\.venv\Scripts\python.exe -m py_compile analytics\evaluation.py analytics\diagnostics.py analytics\analytics.py analytics\features_opportunity.py analytics\opportunity_model.py`
-- Historical opportunity backtest rerun on `2026-01-01` through `2026-03-12`
-- Injury-aware vs injury-disabled comparison run on the same backtest window
-- Confirmed that the injury semantic fix made the official injury layer close to neutral instead of harmful
+#### Points
+- Old state: `MAE 4.7595`, `bias +1.5997`
+- New state: `MAE 4.6386`, `bias +0.6946`
 
-## Next Recommended Task
-1. Continue Phase 4 opportunity improvement.
-2. Tighten player-level injury / availability matching before increasing injury model influence.
-3. Keep official team-summary injury data as weak context only.
-4. Use the pregame context pack for real vacated-role and starter signals.
-5. Revisit denser near-tip historical injury backfill only if we need stronger backtest fidelity.
+Applied in `analytics/pregame_model.py`:
+- much lower PPM regression target
+- lower regression factor
+- removed the automatic home bump
 
-## Things To Be Careful About
-- Do not start live modeling yet.
-- Do not jump straight to points recalibration before improving opportunity features further.
-- Do not treat official team-level injury counts as player-specific opportunity signals.
-- Do not spread scraper-specific or source-specific logic outside the adapter/normalization layer.
-- Do not assume the quarantined rotation games will become available unless the source site changes.
+Assists and threes were checked and left unchanged because their biases remained small.
 
-## Quick Restart Prompt
-If starting a new Codex session, point it to:
-- `AGENTS.md`
-- `PROJECT_STATE.md`
-- `SESSION_HANDOFF.md`
+### 2. Hardened readiness gates
 
-Then ask it to continue with:
-- Phase 4 opportunity model improvement
-- tighten player-specific injury and pregame-context matching
-- keep official team injury summaries as weak context only
+Implemented in `api/services/stats_signal_service.py`:
+- blocked signals never surface a recommendation
+- stat-specific missing-feature blockers
+- stat-specific non-zero sample blockers
+- opportunity-confidence blocker at `< 0.35`
+- stale archive warning when `odds_snapshots` has not updated inside the final pregame window
+
+Health now exposes:
+- `signals_by_stat_type`
+- `blocked_by_stat_type`
+- `blocked_reasons`
+
+### 3. Added append-only signal audit trail
+
+New pieces:
+- ORM model: `SignalAuditTrail`
+- Alembic migration: `b8c9d0e1f2a3_add_signal_audit_trail.py`
+- API service: `api/services/audit_service.py`
+- Routes:
+  - `GET /api/audit/player/{player_id}/game/{game_id}`
+  - `GET /api/audit/game/{game_id}`
+  - `GET /api/audit/recent?limit=50`
+
+`persist_current_signal_snapshots()` and `repair_current_signal_snapshots()` now append audit rows alongside `stats_signal_snapshots`.
+
+### 4. Started calibration analysis properly
+
+Added in `analytics/evaluation.py`:
+- `compute_calibration_curve(...)`
+- `analyze_recommendation_thresholds(...)`
+
+Wired into `analytics/analytics.py` report builders for:
+- points
+- rebounds
+- assists
+- threes
+
+Threshold decisions:
+- tightened points recommendations
+- tightened rebounds recommendations
+- left assists unchanged for now
+- left threes unchanged because line coverage is still zero
+
+### 5. Cleared most of the remaining source-pool audit list
+
+Inserted new `absence_source_overrides` for:
+- `Mikal Bridges`
+- `Isaac Okoro`
+- `Royce O'Neale`
+- `Brandin Podziemski`
+- `Donovan Clingan`
+- `Kris Dunn`
+
+Skipped:
+- `Leaky Black` because the role sample was too small to treat as a stable core source
+
+Current override count in DB:
+- `30`
+
+Starter-pool rebuild result:
+- `149` selected sources
+- `1,426` summaries in the rebuild batch
+
+All six newly added overrides now show up in the starter-pool selection output.
+
+### 6. Finished the injury-report player matching cleanup
+
+Implemented:
+- unified ingestion-time matching onto `analytics/name_matching.py`
+- added transliteration handling for names like `Nikola \u0110uri\u0161i\u0107`
+- added an audited alias for the `Hansen Yang` / `Yang Hansen` order mismatch
+- added team-scoped fuzzy fallback at ingestion time
+- added analytics-side unique last-name fallback for team/date matching
+- added `backfill_injury_entry_player_ids()` plus a jobs wrapper
+- added health coverage metrics for injury-entry match quality
+
+Audit result before backfill:
+- total entry match rate: `92.64%`
+- named entry match rate: `99.39%`
+- all `585` named unmatched rows were only:
+  - `Nikola Djurisic` (`336`)
+  - `Hansen Yang` (`249`)
+
+Backfill result:
+- `total_null`: `585`
+- `resolved`: `585`
+- `still_null`: `0`
+
+Current injury-entry coverage:
+- total entry match rate: `93.21%`
+- named entry match rate: `100.00%`
+
+Important nuance:
+- the opportunity backtest's `official_injury_player_match_pct` stayed flat at `2.26%`
+- opportunity accuracy also stayed flat
+- that means raw name resolution was not the main reason opportunity metrics were weak in this window
+
+## Current Model State
+
+Window: `2026-01-01` through `2026-03-12`
+
+| Stat type | Sample | MAE | RMSE | Bias |
+|---|---:|---:|---:|---:|
+| Points | 9,147 | 4.6386 | 5.8930 | 0.6946 |
+| Rebounds | 9,147 | 1.8497 | 2.4091 | -0.0148 |
+| Assists | 9,147 | 1.3510 | 1.7811 | 0.1559 |
+| Threes | 9,147 | 0.9084 | 1.2157 | 0.1428 |
+
+Recommendation read:
+- points recommendations are now more conservative
+- rebounds recommendations are now more conservative
+- assists still looks good but is running on a thin line sample
+- threes still has no usable historical line archive in this window
+
+Absence-impact status:
+- signed-delta plumbing is fixed
+- default coefficients remain zero
+- next absence-impact work should be pair-quality filtering, not coefficient tuning
+
+Official injury matching status:
+- raw named-entry resolution is effectively complete in the local archive
+- next injury-related work should focus on how matched injury rows influence player-level context features
+
+## What To Do Next
+
+### Highest-value next steps
+1. Audit how player-level official injury rows are used in opportunity features. Matching coverage is fixed, but it is not moving opportunity accuracy yet.
+2. Let the new odds archive accumulate. Calibration and edge validation are still bottlenecked by sparse line history.
+3. Revisit assists and threes threshold policy only after line coverage is denser.
+4. Add pair-level suppression / stronger pair thresholds before trying to re-enable absence-impact bonuses.
+
+### What not to do next
+- do not start live model work yet
+- do not touch the frontend
+- do not re-enable absence-impact by default without a new controlled backtest
+
+## Verification
+
+Run before handing off or merging:
+
+```powershell
+E:\dev\projects\bettingbyte-v2\.venv\Scripts\python.exe -m unittest discover -s E:\dev\projects\bettingbyte-v2\tests -p "test_*.py" -v
+E:\dev\projects\bettingbyte-v2\.venv\Scripts\python.exe -m compileall E:\dev\projects\bettingbyte-v2\database E:\dev\projects\bettingbyte-v2\ingestion E:\dev\projects\bettingbyte-v2\analytics E:\dev\projects\bettingbyte-v2\tests E:\dev\projects\bettingbyte-v2\api
+E:\dev\projects\bettingbyte-v2\.venv\Scripts\python.exe -m pytest E:\dev\projects\bettingbyte-v2\tests\test_jobs.py E:\dev\projects\bettingbyte-v2\tests\test_scheduler.py E:\dev\projects\bettingbyte-v2\tests\test_health_service.py -q
+E:\dev\projects\bettingbyte-v2\.venv\Scripts\alembic.exe upgrade head
+```

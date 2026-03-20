@@ -6,7 +6,13 @@ from unittest.mock import patch
 
 import requests
 
-from ingestion.jobs import _sync_pregame_markets_impl, _sync_scheduled_official_injury_report_impl
+from ingestion.jobs import (
+    _backfill_injury_entry_player_ids_impl,
+    _sync_odds_accumulation_impl,
+    _sync_pregame_markets_impl,
+    _sync_prop_snapshot_phase_impl,
+    _sync_scheduled_official_injury_report_impl,
+)
 
 
 def _build_http_error(status_code: int) -> requests.HTTPError:
@@ -104,3 +110,98 @@ def test_sync_pregame_markets_persists_stats_signal_snapshots() -> None:
     assert result["signal_snapshots"] == 1
     assert result["signal_recommendations"] == 1
     assert run_item_mock.call_args.kwargs["stage"] == "stats_signal_snapshot"
+
+
+def test_sync_prop_snapshot_phase_writes_phased_odds_archive() -> None:
+    board = {
+        "props": [
+            {
+                "game_id": "G1",
+                "player_id": "123",
+                "player_name": "Test Player",
+                "team": "BOS",
+                "opponent": "NYK",
+                "stat_type": "points",
+                "line": 24.5,
+                "over_odds": -110,
+                "under_odds": -110,
+                "captured_at": "2026-03-16T18:00:00",
+            }
+        ],
+        "event_mappings": [{"event_id": "EV1", "nba_game_id": "G1"}],
+        "payloads": [],
+    }
+
+    with patch("ingestion.jobs._sync_reference_entities_impl"), patch(
+        "ingestion.jobs.fetch_current_prop_board", return_value=board
+    ), patch(
+        "ingestion.jobs.get_todays_games_bundle", return_value=([], [])
+    ), patch(
+        "ingestion.jobs.write_source_payloads"
+    ), patch(
+        "ingestion.jobs.write_games"
+    ), patch(
+        "ingestion.jobs.write_players"
+    ), patch(
+        "ingestion.jobs.write_sportsbook_event_mappings"
+    ), patch(
+        "ingestion.jobs.write_prop_snapshot"
+    ), patch(
+        "ingestion.jobs.write_odds_snapshot"
+    ) as write_odds_snapshot_mock:
+        result = _sync_prop_snapshot_phase_impl("late")
+
+    write_odds_snapshot_mock.assert_called_once_with(board["props"], market_phase="late")
+    assert result["snapshot_phase"] == "late"
+
+
+def test_sync_odds_accumulation_persists_accumulation_phase() -> None:
+    board = {
+        "props": [
+            {
+                "game_id": "G1",
+                "player_id": "123",
+                "player_name": "Test Player",
+                "team": "BOS",
+                "opponent": "NYK",
+                "stat_type": "points",
+                "line": 24.5,
+                "over_odds": -110,
+                "under_odds": -110,
+                "captured_at": "2026-03-16T18:00:00",
+            }
+        ],
+        "event_mappings": [{"event_id": "EV1", "nba_game_id": "G1"}],
+        "payloads": [],
+    }
+
+    with patch("ingestion.jobs._sync_reference_entities_impl"), patch(
+        "ingestion.jobs.fetch_current_prop_board", return_value=board
+    ), patch(
+        "ingestion.jobs.get_todays_games_bundle", return_value=([], [])
+    ), patch(
+        "ingestion.jobs.write_source_payloads"
+    ), patch(
+        "ingestion.jobs.write_games"
+    ), patch(
+        "ingestion.jobs.write_players"
+    ), patch(
+        "ingestion.jobs.write_sportsbook_event_mappings"
+    ), patch(
+        "ingestion.jobs.write_odds_snapshot"
+    ) as write_odds_snapshot_mock:
+        result = _sync_odds_accumulation_impl()
+
+    write_odds_snapshot_mock.assert_called_once_with(board["props"], market_phase="accumulation")
+    assert result["market_phase"] == "accumulation"
+
+
+def test_backfill_injury_entry_player_ids_job_delegates_to_ingestion_impl() -> None:
+    with patch(
+        "ingestion.jobs.backfill_injury_entry_player_ids_impl",
+        return_value={"total_null": 10, "resolved": 8, "still_null": 2},
+    ) as backfill_mock:
+        result = _backfill_injury_entry_player_ids_impl()
+
+    backfill_mock.assert_called_once_with()
+    assert result["resolved"] == 8

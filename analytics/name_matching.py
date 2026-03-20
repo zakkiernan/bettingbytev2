@@ -5,10 +5,29 @@ import unicodedata
 
 
 _SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
+_TRANSLITERATION_REPLACEMENTS = {
+    "Đ": "Dj",
+    "đ": "dj",
+    "Ł": "L",
+    "ł": "l",
+    "Ø": "O",
+    "ø": "o",
+    "Æ": "Ae",
+    "æ": "ae",
+    "Œ": "Oe",
+    "œ": "oe",
+    "ß": "ss",
+}
+
+# Keep aliases small and auditable. These entries come from the local injury audit.
+PLAYER_NAME_ALIASES: dict[str, str] = {
+    "hansen yang": "yang hansen",
+}
 
 
 def normalize_name(name: str) -> str:
-    ascii_name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+    transliterated = "".join(_TRANSLITERATION_REPLACEMENTS.get(char, char) for char in name)
+    ascii_name = unicodedata.normalize("NFKD", transliterated).encode("ascii", "ignore").decode("ascii")
     cleaned = re.sub(r"[^a-zA-Z0-9 ]+", " ", ascii_name.lower())
     return re.sub(r"\s+", " ", cleaned).strip()
 
@@ -25,6 +44,7 @@ def candidate_name_keys(name: str) -> list[str]:
     _append_unique(base_forms, normalized)
     _append_unique(base_forms, _collapse_leading_initials(tokens))
     _append_unique(base_forms, _expand_leading_initials(tokens, raw_tokens))
+    _append_alias_forms(base_forms, normalized)
 
     keys: list[str] = []
     for form in base_forms:
@@ -42,8 +62,25 @@ def _append_unique(keys: list[str], candidate: str | None) -> None:
         keys.append(candidate)
 
 
+def _append_alias_forms(base_forms: list[str], normalized: str) -> None:
+    alias_targets: list[str] = []
+    _append_unique(alias_targets, PLAYER_NAME_ALIASES.get(normalized))
+
+    tokens = normalized.split()
+    while tokens and tokens[-1] in _SUFFIXES:
+        tokens = tokens[:-1]
+        if not tokens:
+            break
+        _append_unique(alias_targets, PLAYER_NAME_ALIASES.get(" ".join(tokens)))
+
+    for alias_target in alias_targets:
+        _append_unique(base_forms, alias_target)
+        _append_unique(base_forms, _collapse_leading_initials(alias_target.split()))
+
+
 def _raw_word_tokens(name: str) -> list[str]:
-    ascii_name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+    transliterated = "".join(_TRANSLITERATION_REPLACEMENTS.get(char, char) for char in name)
+    ascii_name = unicodedata.normalize("NFKD", transliterated).encode("ascii", "ignore").decode("ascii")
     return re.findall(r"[A-Za-z0-9]+", ascii_name)
 
 

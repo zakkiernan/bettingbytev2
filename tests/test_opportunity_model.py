@@ -377,6 +377,16 @@ class PregameOpportunityModelTests(unittest.TestCase):
         self.assertGreater(replacement.breakdown.role_replacement_usage_bonus, 0.0)
 
     def test_empirical_absence_impact_adds_gated_minutes_and_usage(self):
+        config = PregameOpportunityModelConfig(
+            absence_impact_minutes_factor=0.35,
+            absence_impact_minutes_cap=4.5,
+            absence_impact_usage_factor=0.45,
+            absence_impact_usage_cap=0.035,
+            absence_impact_touches_factor=0.18,
+            absence_impact_touches_cap=8.0,
+            absence_impact_passes_factor=0.20,
+            absence_impact_passes_cap=6.0,
+        )
         baseline = project_pregame_opportunity(self.build_feature(
             context_source="official_injury_team",
             pregame_context_confidence=0.35,
@@ -386,7 +396,7 @@ class PregameOpportunityModelTests(unittest.TestCase):
             absence_impact_passes_delta=None,
             absence_impact_sample_confidence=None,
             absence_impact_source_count=None,
-        ))
+        ), config=config)
         boosted = project_pregame_opportunity(self.build_feature(
             context_source="official_injury_team",
             pregame_context_confidence=0.35,
@@ -396,13 +406,51 @@ class PregameOpportunityModelTests(unittest.TestCase):
             absence_impact_passes_delta=4.0,
             absence_impact_sample_confidence=0.6,
             absence_impact_source_count=1.0,
-        ))
+        ), config=config)
 
-        self.assertEqual(boosted.breakdown.expected_minutes, baseline.breakdown.expected_minutes)
+        self.assertGreater(boosted.breakdown.expected_minutes, baseline.breakdown.expected_minutes)
         self.assertGreater(boosted.breakdown.expected_usage_pct, baseline.breakdown.expected_usage_pct)
         self.assertGreater(boosted.breakdown.expected_touches, baseline.breakdown.expected_touches)
-        self.assertEqual(boosted.breakdown.absence_impact_minutes_bonus, 0.0)
+        self.assertGreater(boosted.breakdown.absence_impact_minutes_bonus, 0.0)
         self.assertGreater(boosted.breakdown.absence_impact_usage_bonus, 0.0)
+
+    def test_empirical_absence_impact_allows_negative_deltas(self):
+        config = PregameOpportunityModelConfig(
+            absence_impact_minutes_factor=0.35,
+            absence_impact_minutes_cap=4.5,
+            absence_impact_usage_factor=0.45,
+            absence_impact_usage_cap=0.035,
+            absence_impact_touches_factor=0.18,
+            absence_impact_touches_cap=8.0,
+            absence_impact_passes_factor=0.20,
+            absence_impact_passes_cap=6.0,
+        )
+        baseline = project_pregame_opportunity(self.build_feature(
+            context_source="official_injury_team",
+            pregame_context_confidence=0.35,
+            absence_impact_minutes_delta=None,
+            absence_impact_usage_delta=None,
+            absence_impact_touches_delta=None,
+            absence_impact_passes_delta=None,
+            absence_impact_sample_confidence=None,
+            absence_impact_source_count=None,
+        ), config=config)
+        suppressed = project_pregame_opportunity(self.build_feature(
+            context_source="official_injury_team",
+            pregame_context_confidence=0.35,
+            absence_impact_minutes_delta=-3.0,
+            absence_impact_usage_delta=-0.02,
+            absence_impact_touches_delta=-6.0,
+            absence_impact_passes_delta=-3.0,
+            absence_impact_sample_confidence=0.6,
+            absence_impact_source_count=1.0,
+        ), config=config)
+
+        self.assertLess(suppressed.breakdown.expected_minutes, baseline.breakdown.expected_minutes)
+        self.assertLess(suppressed.breakdown.expected_usage_pct, baseline.breakdown.expected_usage_pct)
+        self.assertLess(suppressed.breakdown.expected_touches, baseline.breakdown.expected_touches)
+        self.assertLess(suppressed.breakdown.absence_impact_minutes_bonus, 0.0)
+        self.assertLess(suppressed.breakdown.absence_impact_usage_bonus, 0.0)
 
 
 class RoleReplacementFeatureTests(unittest.TestCase):

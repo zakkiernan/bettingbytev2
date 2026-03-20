@@ -970,10 +970,10 @@ def _build_absence_impact_context(
         if sample_confidence < 0.18 or int(summary.source_out_game_count or 0) < 2:
             continue
         weight = min(sample_confidence, 1.0)
-        minutes_delta += max(float(summary.minutes_delta or 0.0), 0.0) * weight
-        usage_delta += max(float(summary.usage_delta or 0.0), 0.0) * weight
-        touches_delta += max(float(summary.touches_delta or 0.0), 0.0) * weight
-        passes_delta += max(float(summary.passes_delta or 0.0), 0.0) * weight
+        minutes_delta += float(summary.minutes_delta or 0.0) * weight
+        usage_delta += float(summary.usage_delta or 0.0) * weight
+        touches_delta += float(summary.touches_delta or 0.0) * weight
+        passes_delta += float(summary.passes_delta or 0.0) * weight
         best_confidence = max(best_confidence, sample_confidence)
         source_count += 1
 
@@ -981,10 +981,10 @@ def _build_absence_impact_context(
         return base
 
     return {
-        "absence_impact_minutes_delta": round(minutes_delta, 4) if minutes_delta > 0.0 else None,
-        "absence_impact_usage_delta": round(usage_delta, 4) if usage_delta > 0.0 else None,
-        "absence_impact_touches_delta": round(touches_delta, 4) if touches_delta > 0.0 else None,
-        "absence_impact_passes_delta": round(passes_delta, 4) if passes_delta > 0.0 else None,
+        "absence_impact_minutes_delta": round(minutes_delta, 4) if abs(minutes_delta) > 0.0001 else None,
+        "absence_impact_usage_delta": round(usage_delta, 4) if abs(usage_delta) > 0.0001 else None,
+        "absence_impact_touches_delta": round(touches_delta, 4) if abs(touches_delta) > 0.0001 else None,
+        "absence_impact_passes_delta": round(passes_delta, 4) if abs(passes_delta) > 0.0001 else None,
         "absence_impact_sample_confidence": round(best_confidence, 4) if best_confidence > 0.0 else None,
         "absence_impact_source_count": float(source_count),
     }

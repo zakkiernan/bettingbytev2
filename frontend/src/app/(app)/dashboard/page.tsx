@@ -1,21 +1,57 @@
-import { PageTemplate } from "@/components/placeholders/page-template";
+import { Suspense } from "react";
+import { Skeleton } from "@/components/ui/skeleton";
+import SlateSection from "./_components/SlateSection";
+import HealthSection from "./_components/HealthSection";
+
+export const dynamic = "force-dynamic";
+
+function SlateSkeleton() {
+  return (
+    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+      {Array.from({ length: 4 }).map((_, i) => (
+        <Skeleton key={i} className="h-[88px]" />
+      ))}
+    </div>
+  );
+}
+
+function HealthSkeleton() {
+  return (
+    <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+      {Array.from({ length: 5 }).map((_, i) => (
+        <Skeleton key={i} className="h-[160px]" />
+      ))}
+    </div>
+  );
+}
 
 export default function DashboardPage() {
   return (
-    <PageTemplate
-      eyebrow="/dashboard"
-      title="Daily command center"
-      description="The dashboard shell is wired for today’s slate cards, top edges, injury watch, picks summary, and live-now widgets without depending on backend query implementation yet."
-      apiContracts={[
-        "GET /api/games/today",
-        "GET /api/edges/today?sort=confidence&limit=10",
-        "GET /api/live/active",
-      ]}
-      highlights={[
-        "Bento layout is ready for slate cards, top-edge cards, and fast context panels with mono data styling.",
-        "The header stays mobile-friendly while preserving desktop density for daily decision-making.",
-        "Free-vs-premium gating can slot in at the card level without reworking the page frame.",
-      ]}
-    />
+    <div className="space-y-8">
+      {/* Page header */}
+      <div>
+        <p className="text-xs uppercase tracking-[0.22em] text-[color:var(--color-text-muted)]">
+          Internal
+        </p>
+        <h1 className="text-2xl font-bold">Dashboard</h1>
+      </div>
+
+      {/* Tonight's slate summary */}
+      <section className="space-y-3">
+        <p className="text-xs font-medium uppercase tracking-[0.22em] text-[color:var(--color-text-muted)]">
+          Tonight's slate
+        </p>
+        <Suspense fallback={<SlateSkeleton />}>
+          <SlateSection />
+        </Suspense>
+      </section>
+
+      {/* Pipeline health */}
+      <section className="space-y-3">
+        <Suspense fallback={<HealthSkeleton />}>
+          <HealthSection />
+        </Suspense>
+      </section>
+    </div>
   );
 }

@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import unittest
+from contextlib import contextmanager
 from datetime import date, datetime
 from unittest.mock import patch
 
 from ingestion.injury_reports import (
     InjuryReportEntry,
     ParsedInjuryReport,
+    PlayerLookupIndex,
+    PlayerLookupRow,
+    _resolve_player_id,
+    backfill_injury_entry_player_ids,
     build_injury_report_url,
     default_backfill_report_times,
     normalize_injury_report,
@@ -369,9 +374,19 @@ class InjuryReportParsingTests(unittest.TestCase):
             "CLE": {"team_id": "1610612739", "team_name": "Cleveland Cavaliers"},
             "ORL": {"team_id": "1610612753", "team_name": "Orlando Magic"},
         }
-        mock_player_lookup.return_value = {
-            "jarrett allen": "1628386",
-        }
+        mock_player_lookup.return_value = PlayerLookupIndex(
+            exact_lookup={"jarrett allen": "1628386"},
+            player_team_lookup={"1628386": "CLE"},
+            player_rows=[
+                PlayerLookupRow(
+                    player_id="1628386",
+                    full_name="Jarrett Allen",
+                    team_abbreviation="CLE",
+                    normalized_name="jarrett allen",
+                    tokens=("jarrett", "allen"),
+                )
+            ],
+        )
         parsed = ParsedInjuryReport(
             report_date=date(2026, 3, 11),
             report_time_et="12:00 AM",
@@ -413,6 +428,144 @@ class InjuryReportParsingTests(unittest.TestCase):
         self.assertEqual(entry_rows[1]["player_id"], None)
         self.assertEqual(payload["payload_type"], "injury_report_pdf")
         self.assertEqual(payload["context"]["entry_count"], 2)
+
+    def test_resolve_player_id_handles_alias_name_order_variant(self):
+        lookup = PlayerLookupIndex(
+            exact_lookup={"yang hansen": "1642905"},
+            player_team_lookup={"1642905": "POR"},
+            player_rows=[
+                PlayerLookupRow(
+                    player_id="1642905",
+                    full_name="Yang Hansen",
+                    team_abbreviation="POR",
+                    normalized_name="yang hansen",
+                    tokens=("yang", "hansen"),
+                )
+            ],
+        )
+
+        self.assertEqual(
+            _resolve_player_id("Hansen Yang", lookup, team_abbreviation="POR"),
+            "1642905",
+        )
+
+    def test_resolve_player_id_uses_team_scoped_fuzzy_fallback(self):
+        lookup = PlayerLookupIndex(
+            exact_lookup={},
+            player_team_lookup={"1628983": "OKC"},
+            player_rows=[
+                PlayerLookupRow(
+                    player_id="1628983",
+                    full_name="Shai Gilgeous Alexander",
+                    team_abbreviation="OKC",
+                    normalized_name="shai gilgeous alexander",
+                    tokens=("shai", "gilgeous", "alexander"),
+                )
+            ],
+        )
+
+        self.assertEqual(
+            _resolve_player_id("Shai Alexander", lookup, team_abbreviation="OKC"),
+            "1628983",
+        )
+        self.assertIsNone(_resolve_player_id("Shai Alexander", lookup, team_abbreviation="BOS"))
+
+    def test_backfill_injury_entry_player_ids_updates_only_named_null_rows(self):
+        rows = [
+            InjuryReportEntry(
+                game_date=date(2026, 3, 11),
+                game_time_et="07:30 (ET)",
+                matchup="CLE@ORL",
+                team_abbreviation="CLE",
+                team_name="Cleveland Cavaliers",
+                player_name="Jarrett Allen",
+                current_status="OUT",
+                reason="Injury/Illness - Right Knee; Tendonitis",
+                report_submitted=True,
+            ),
+            InjuryReportEntry(
+                game_date=date(2026, 3, 11),
+                game_time_et="07:30 (ET)",
+                matchup="POR@LAL",
+                team_abbreviation="POR",
+                team_name="Portland Trail Blazers",
+                player_name="Hansen Yang",
+                current_status="OUT",
+                reason="Injury/Illness - Ankle",
+                report_submitted=True,
+            ),
+        ]
+        fake_db_rows = []
+        for entry in rows:
+            fake_db_rows.append(
+                type(
+                    "FakeEntryRow",
+                    (),
+                    {
+                        "player_id": None,
+                        "player_name": entry.player_name,
+                        "team_abbreviation": entry.team_abbreviation,
+                    },
+                )()
+            )
+
+        class FakeQuery:
+            def __init__(self, query_rows):
+                self.query_rows = query_rows
+
+            def filter(self, *args, **kwargs):
+                return self
+
+            def all(self):
+                return self.query_rows
+
+        class FakeSession:
+            def __init__(self, query_rows):
+                self.query_rows = query_rows
+
+            def query(self, model):
+                return FakeQuery(self.query_rows)
+
+        @contextmanager
+        def fake_session_scope():
+            yield FakeSession(fake_db_rows)
+
+        lookup = PlayerLookupIndex(
+            exact_lookup={
+                "jarrett allen": "1628386",
+                "yang hansen": "1642905",
+            },
+            player_team_lookup={
+                "1628386": "CLE",
+                "1642905": "POR",
+            },
+            player_rows=[
+                PlayerLookupRow(
+                    player_id="1628386",
+                    full_name="Jarrett Allen",
+                    team_abbreviation="CLE",
+                    normalized_name="jarrett allen",
+                    tokens=("jarrett", "allen"),
+                ),
+                PlayerLookupRow(
+                    player_id="1642905",
+                    full_name="Yang Hansen",
+                    team_abbreviation="POR",
+                    normalized_name="yang hansen",
+                    tokens=("yang", "hansen"),
+                ),
+            ],
+        )
+
+        with patch("ingestion.injury_reports._load_player_lookup", return_value=lookup), patch(
+            "ingestion.injury_reports.session_scope",
+            fake_session_scope,
+        ):
+            result = backfill_injury_entry_player_ids()
+
+        self.assertEqual(result, {"total_null": 2, "resolved": 2, "still_null": 0})
+        self.assertEqual(fake_db_rows[0].player_id, "1628386")
+        self.assertEqual(fake_db_rows[1].player_id, "1642905")
 
 
 if __name__ == "__main__":

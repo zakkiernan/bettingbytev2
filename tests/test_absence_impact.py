@@ -501,6 +501,31 @@ class AbsenceImpactTests(unittest.TestCase):
         aaa = [row for row in selections if row.team_abbreviation == "AAA"]
         self.assertIn("300", [row.source_player_id for row in aaa])
 
+    def test_include_override_bypasses_stale_recency_guard(self):
+        self._seed()
+        self._add_override(
+            team_abbreviation="AAA",
+            player_id="300",
+            player_name="Neutral Guy",
+            include_as_source=True,
+            note="manual include for stale returning source",
+        )
+
+        with patch("analytics.absence_impact.session_scope", self.session_scope):
+            selections = select_starter_pool_absence_sources(
+                start_date=datetime(2026, 1, 1),
+                end_date=datetime(2026, 2, 10, 23, 59, 59),
+                min_active_games=8,
+                min_out_games=2,
+                max_sources_per_team=5,
+                min_avg_minutes=24.0,
+                min_start_rate=0.35,
+                max_days_since_last_team_game=10,
+            )
+
+        aaa = [row for row in selections if row.team_abbreviation == "AAA"]
+        self.assertIn("300", [row.source_player_id for row in aaa])
+
     def test_exclude_override_suppresses_otherwise_selected_player(self):
         self._seed()
         self._add_override(

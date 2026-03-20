@@ -7,13 +7,20 @@ from pydantic import Field
 
 from api.schemas.base import APIModel
 from api.schemas.board import PropBoardRow
+from api.schemas.narrative import NarrativeContext
 
 
 class PointsBreakdown(APIModel):
     base_scoring: float = 0.0
+    base_rebounding: float = 0.0
+    base_playmaking: float = 0.0
+    base_shooting: float = 0.0
     recent_form_adjustment: float = 0.0
     minutes_adjustment: float = 0.0
     usage_adjustment: float = 0.0
+    rebound_rate_adjustment: float = 0.0
+    playmaking_adjustment: float = 0.0
+    volume_adjustment: float = 0.0
     efficiency_adjustment: float = 0.0
     opponent_adjustment: float = 0.0
     pace_adjustment: float = 0.0
@@ -21,7 +28,13 @@ class PointsBreakdown(APIModel):
     expected_minutes: float = 0.0
     expected_usage_pct: float = 0.0
     points_per_minute: float = 0.0
+    rebounds_per_minute: float = 0.0
+    assists_per_minute: float = 0.0
+    threes_per_minute: float = 0.0
     projected_points: float = 0.0
+    projected_rebounds: float = 0.0
+    projected_assists: float = 0.0
+    projected_threes: float = 0.0
 
 
 class InjuryEntry(APIModel):
@@ -47,6 +60,7 @@ class OpportunityContext(APIModel):
 
 
 class FeatureSnapshot(APIModel):
+    stat_type: str = "points"
     team_abbreviation: str
     opponent_abbreviation: str
     is_home: bool
@@ -56,10 +70,22 @@ class FeatureSnapshot(APIModel):
     season_points_avg: float | None = None
     last10_points_avg: float | None = None
     last5_points_avg: float | None = None
+    season_rebounds_avg: float | None = None
+    last10_rebounds_avg: float | None = None
+    last5_rebounds_avg: float | None = None
+    season_assists_avg: float | None = None
+    last10_assists_avg: float | None = None
+    last5_assists_avg: float | None = None
+    season_threes_avg: float | None = None
+    last10_threes_avg: float | None = None
+    last5_threes_avg: float | None = None
     season_minutes_avg: float | None = None
     last10_minutes_avg: float | None = None
     last5_minutes_avg: float | None = None
     season_usage_pct: float | None = None
+    season_reb_pct: float | None = None
+    season_ast_pct: float | None = None
+    season_3pa_rate: float | None = None
     opponent_def_rating: float | None = None
     opponent_pace: float | None = None
     team_pace: float | None = None
@@ -91,3 +117,4 @@ class PropDetailResponse(PropBoardRow):
     opportunity: OpportunityContext
     features: FeatureSnapshot
     recent_game_log: list[GameLogEntry] = Field(default_factory=list)
+    narrative: NarrativeContext | None = None

@@ -42,6 +42,8 @@ class PropBoardRow(APIModel):
     recent_games_count: int | None = None
     key_factor: str | None = None
     readiness: SignalReadiness = Field(default_factory=SignalReadiness)
+    recent_values: list[float] | None = None
+    opening_line: float | None = None
 
 
 class PropBoardMeta(APIModel):

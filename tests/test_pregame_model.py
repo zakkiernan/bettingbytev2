@@ -90,12 +90,24 @@ class PregamePointsModelTests(unittest.TestCase):
         return base
 
     def test_projection_recommends_over_for_strong_profile(self):
-        projection = project_pregame_points(self.build_feature())
+        projection = project_pregame_points(
+            self.build_feature(
+                line=22.5,
+                last10_points_avg=27.4,
+                last5_points_avg=29.8,
+                last10_usage_pct=0.305,
+                last5_usage_pct=0.314,
+                last10_est_usage_pct=0.296,
+                last5_est_usage_pct=0.304,
+                last10_touches=63.0,
+                last5_touches=65.5,
+            )
+        )
 
-        self.assertGreater(projection.projected_value, 24.5)
+        self.assertGreater(projection.projected_value, 22.5)
         self.assertEqual(projection.recommended_side, "OVER")
         self.assertGreater(projection.over_probability, 0.54)
-        self.assertGreater(projection.confidence, 0.4)
+        self.assertGreater(projection.confidence, 0.65)
 
 
     def test_projection_uses_opportunity_backbone_for_role_lift(self):

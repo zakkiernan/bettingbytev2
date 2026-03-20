@@ -31,6 +31,16 @@ if DATABASE_URL.startswith("sqlite"):
 
 engine = create_engine(DATABASE_URL, future=True, **engine_kwargs)
 
+# Enable WAL mode for SQLite so readers don't block on writers (scheduler).
+if DATABASE_URL.startswith("sqlite"):
+    from sqlalchemy import event, text
+
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_wal(dbapi_conn, connection_record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.close()
+
 SessionLocal = sessionmaker(
     bind=engine,
     autocommit=False,

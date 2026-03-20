@@ -1,19 +1,24 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy.orm import Session
 
-from analytics.name_matching import candidate_name_keys
+from analytics.name_matching import candidate_name_keys, normalize_name
 from database.models import OfficialInjuryReport, OfficialInjuryReportEntry
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
 class OfficialInjuryReportIndex:
     by_date_team_player_id: dict[tuple[str, str, str], dict[str, Any]]
     by_date_team_name: dict[tuple[str, str, str], dict[str, Any]]
+    by_date_team_first_name: dict[tuple[str, str, str], list[dict[str, Any]]]
+    by_date_team_last_name: dict[tuple[str, str, str], list[dict[str, Any]]]
     team_summaries: dict[tuple[str, str], dict[str, Any]]
     team_rows: dict[tuple[str, str], list[dict[str, Any]]]
 
@@ -55,6 +60,8 @@ def load_latest_official_injury_report_rows(
 def build_official_injury_report_index(rows: list[dict[str, Any]]) -> OfficialInjuryReportIndex:
     by_date_team_player_id: dict[tuple[str, str, str], dict[str, Any]] = {}
     by_date_team_name: dict[tuple[str, str, str], dict[str, Any]] = {}
+    by_date_team_first_name: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    by_date_team_last_name: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     team_summaries: dict[tuple[str, str], dict[str, Any]] = {}
     team_rows: dict[tuple[str, str], list[dict[str, Any]]] = {}
     team_seen_players: dict[tuple[str, str], set[tuple[str, str]]] = {}
@@ -74,6 +81,16 @@ def build_official_injury_report_index(rows: list[dict[str, Any]]) -> OfficialIn
         if player_name:
             for candidate in candidate_name_keys(player_name):
                 by_date_team_name.setdefault((date_key, team_abbreviation, candidate), row)
+            name_tokens = normalize_name(player_name).split()
+            if name_tokens:
+                by_date_team_first_name.setdefault(
+                    (date_key, team_abbreviation, name_tokens[0]),
+                    [],
+                ).append(row)
+                by_date_team_last_name.setdefault(
+                    (date_key, team_abbreviation, name_tokens[-1]),
+                    [],
+                ).append(row)
 
         team_key = (date_key, team_abbreviation)
         player_identity = None
@@ -133,6 +150,8 @@ def build_official_injury_report_index(rows: list[dict[str, Any]]) -> OfficialIn
     return OfficialInjuryReportIndex(
         by_date_team_player_id=by_date_team_player_id,
         by_date_team_name=by_date_team_name,
+        by_date_team_first_name=by_date_team_first_name,
+        by_date_team_last_name=by_date_team_last_name,
         team_summaries=team_summaries,
         team_rows=team_rows,
     )
@@ -162,6 +181,24 @@ def match_official_injury_row(
         match = index.by_date_team_name.get((date_key, team_abbr, candidate))
         if match is not None:
             return match
+
+    name_tokens = normalize_name(player_name).split()
+    if name_tokens:
+        last_name_key = (date_key, team_abbr, name_tokens[-1])
+        last_name_matches = index.by_date_team_last_name.get(last_name_key, [])
+        eligible_last_name_matches = [
+            row
+            for row in last_name_matches
+            if str(row.get("current_status") or "").upper() != "AVAILABLE"
+        ]
+        if len(eligible_last_name_matches) == 1:
+            LOGGER.info(
+                "Using team-scoped last-name fallback for official injury match: %s %s %s",
+                date_key,
+                team_abbr,
+                player_name,
+            )
+            return eligible_last_name_matches[0]
     return None
 
 

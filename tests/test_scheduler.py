@@ -11,6 +11,7 @@ from ingestion.scheduler import (
     _select_pregame_market_window,
     _select_due_injury_report_slot,
     _select_due_snapshot_phase,
+    run_odds_accumulation_cycle,
     run_prop_snapshot_schedule_cycle,
     run_signal_snapshot_repair_cycle,
     run_scheduled_official_injury_report_cycle,
@@ -179,6 +180,38 @@ def test_run_signal_snapshot_repair_cycle_invokes_repair_inside_active_window() 
     repair_mock.assert_called_once_with()
 
 
+def test_run_odds_accumulation_cycle_invokes_sync_inside_active_window() -> None:
+    with (
+        patch(
+            "ingestion.scheduler.get_todays_games_bundle",
+            return_value=(
+                [{"game_id": "001", "game_time_utc": datetime(2026, 3, 15, 16, 0, 0, tzinfo=timezone.utc)}],
+                [],
+            ),
+        ),
+        patch("ingestion.scheduler.sync_odds_accumulation") as sync_mock,
+    ):
+        run_odds_accumulation_cycle(datetime(2026, 3, 15, 11, 30, 0))
+
+    sync_mock.assert_called_once_with()
+
+
+def test_run_odds_accumulation_cycle_skips_outside_active_window() -> None:
+    with (
+        patch(
+            "ingestion.scheduler.get_todays_games_bundle",
+            return_value=(
+                [{"game_id": "001", "game_time_utc": datetime(2026, 3, 16, 2, 30, 0, tzinfo=timezone.utc)}],
+                [],
+            ),
+        ),
+        patch("ingestion.scheduler.sync_odds_accumulation") as sync_mock,
+    ):
+        run_odds_accumulation_cycle(datetime(2026, 3, 15, 12, 45, 0))
+
+    sync_mock.assert_not_called()
+
+
 def test_run_prop_snapshot_schedule_cycle_accepts_aware_tip_times() -> None:
     with (
         patch(
@@ -269,6 +302,12 @@ def test_start_scheduler_registers_official_injury_report_cycle() -> None:
     assert pregame_job["trigger"] == "cron"
     assert pregame_job["kwargs"]["hour"] == "11-23"
     assert pregame_job["kwargs"]["minute"] == "0,15,30,45"
+
+    accumulation_job = next(job for job in scheduled_jobs if job["kwargs"].get("id") == "odds_accumulation_cycle")
+    assert accumulation_job["func"] is run_odds_accumulation_cycle
+    assert accumulation_job["trigger"] == "cron"
+    assert accumulation_job["kwargs"]["hour"] == "11-23"
+    assert accumulation_job["kwargs"]["minute"] == "0,30"
 
     repair_job = next(job for job in scheduled_jobs if job["kwargs"].get("id") == "signal_snapshot_repair_cycle")
     assert repair_job["func"] is run_signal_snapshot_repair_cycle

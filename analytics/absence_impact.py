@@ -489,11 +489,6 @@ def select_starter_pool_absence_sources(
         active_games = {str(row.game_id) for row in rows}
         out_game_ids = _resolve_out_game_ids(dataset, source_player_id=source_player_id, team_abbreviation=team_abbreviation) - active_games
 
-        avg_minutes, avg_usage, avg_touches, avg_passes, start_rate, close_rate = _source_role_stats(dataset, rows)
-        tenure_end_date = max(row.game_date.date() for row in rows)
-        if reference_date is not None and tenure_end_date < (reference_date - timedelta(days=max_days_since_last_team_game)):
-            continue
-
         source_override = _resolve_source_override(
             dataset,
             team_abbreviation=team_abbreviation,
@@ -503,6 +498,16 @@ def select_starter_pool_absence_sources(
         )
         if source_override is not None and not source_override.include_as_source:
             continue
+        forced_include = source_override is not None and source_override.include_as_source
+
+        avg_minutes, avg_usage, avg_touches, avg_passes, start_rate, close_rate = _source_role_stats(dataset, rows)
+        tenure_end_date = max(row.game_date.date() for row in rows)
+        if (
+            not forced_include
+            and reference_date is not None
+            and tenure_end_date < (reference_date - timedelta(days=max_days_since_last_team_game))
+        ):
+            continue
 
         qualifies_standard = len(active_games) >= min_active_games and len(out_game_ids) >= min_out_games
         qualifies_returning_star = (
@@ -511,7 +516,6 @@ def select_starter_pool_absence_sources(
             and avg_minutes >= returning_star_min_avg_minutes
             and (start_rate is None or (start_rate or 0.0) >= returning_star_min_start_rate)
         )
-        forced_include = source_override is not None and source_override.include_as_source
         if not forced_include and not qualifies_standard and not qualifies_returning_star:
             continue
 

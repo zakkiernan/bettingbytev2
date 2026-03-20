@@ -738,3 +738,30 @@ class StatsSignalSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
 
+class SignalAuditTrail(Base):
+    __tablename__ = "signal_audit_trail"
+    __table_args__ = (
+        Index("ix_signal_audit_trail_game_captured", "game_id", "captured_at"),
+        Index("ix_signal_audit_trail_player_captured", "player_id", "captured_at"),
+        Index("ix_signal_audit_trail_phase_captured", "snapshot_phase", "captured_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    game_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    player_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    stat_type: Mapped[str] = mapped_column(String, nullable=False)
+    snapshot_phase: Mapped[str] = mapped_column(String, nullable=False, default="current")
+    line: Mapped[float] = mapped_column(Float, nullable=False)
+    projected_value: Mapped[float] = mapped_column(Float, nullable=False)
+    edge: Mapped[float] = mapped_column(Float, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    recommended_side: Mapped[str | None] = mapped_column(String, nullable=True)
+    readiness_status: Mapped[str] = mapped_column(String, nullable=False, default="ready")
+    blockers_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    warnings_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    breakdown_json: Mapped[str] = mapped_column(Text, nullable=False)
+    source_context_captured_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    source_injury_report_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+

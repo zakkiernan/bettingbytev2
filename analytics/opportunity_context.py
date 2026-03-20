@@ -185,12 +185,12 @@ def apply_role_vacancy_adjustments(
     absence_impact_weight *= absence_impact_weight
     absence_impact_minutes_bonus = clamp(
         value_or_zero(features.absence_impact_minutes_delta) * config.absence_impact_minutes_factor,
-        0.0,
+        -config.absence_impact_minutes_cap,
         config.absence_impact_minutes_cap,
     ) * absence_impact_weight
     absence_impact_usage_bonus = clamp(
         value_or_zero(features.absence_impact_usage_delta) * config.absence_impact_usage_factor,
-        0.0,
+        -config.absence_impact_usage_cap,
         config.absence_impact_usage_cap,
     ) * absence_impact_weight
     expected_minutes += absence_impact_minutes_bonus
@@ -198,12 +198,12 @@ def apply_role_vacancy_adjustments(
     expected_est_usage_pct = clamp(expected_est_usage_pct + absence_impact_usage_bonus * 0.85, 0.0, 0.5)
     expected_touches += clamp(
         value_or_zero(features.absence_impact_touches_delta) * config.absence_impact_touches_factor,
-        0.0,
+        -config.absence_impact_touches_cap,
         config.absence_impact_touches_cap,
     ) * absence_impact_weight
     expected_passes += clamp(
         value_or_zero(features.absence_impact_passes_delta) * config.absence_impact_passes_factor,
-        0.0,
+        -config.absence_impact_passes_cap,
         config.absence_impact_passes_cap,
     ) * absence_impact_weight
 

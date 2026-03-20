@@ -5,7 +5,6 @@ import io
 import logging
 import re
 import time as time_module
-import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Any
@@ -13,9 +12,11 @@ from zoneinfo import ZoneInfo
 
 import requests
 from pypdf import PdfReader
+from sqlalchemy import and_, func
 
+from analytics.name_matching import candidate_name_keys, normalize_name
 from database.db import session_scope
-from database.models import OfficialInjuryReport, Player, Team
+from database.models import HistoricalGameLog, OfficialInjuryReport, OfficialInjuryReportEntry, Player, Team
 from ingestion.writer import write_official_injury_report, write_source_payloads
 
 LOGGER = logging.getLogger(__name__)
@@ -64,7 +65,7 @@ TEAM_ALIASES = {
 GAME_DATE_PATTERN = re.compile(r"^\d{2}/\d{2}/\d{4}$")
 MATCHUP_PATTERN = re.compile(r"^[A-Z]{2,3}@[A-Z]{2,3}$")
 NAME_SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
-PLAYER_LOOKUP_CACHE: dict[str, str] | None = None
+PLAYER_LOOKUP_CACHE: "PlayerLookupIndex | None" = None
 
 
 @dataclass(slots=True)
@@ -98,6 +99,22 @@ class GameSegment:
     matchup: str
     start_index: int
     end_index: int
+
+
+@dataclass(slots=True)
+class PlayerLookupRow:
+    player_id: str
+    full_name: str
+    team_abbreviation: str | None
+    normalized_name: str
+    tokens: tuple[str, ...]
+
+
+@dataclass(slots=True)
+class PlayerLookupIndex:
+    exact_lookup: dict[str, str]
+    player_team_lookup: dict[str, str]
+    player_rows: list[PlayerLookupRow]
 
 
 def build_injury_report_url(report_date: date, report_time_et: time) -> str:
@@ -453,7 +470,7 @@ def _derive_player_start(tokens: list[str], lower_bound: int, status_index: int)
 
     comma_index = comma_indices[-1]
     start = comma_index
-    normalized = _normalize_name(tokens[start].replace(",", ""))
+    normalized = normalize_name(tokens[start].replace(",", ""))
     if normalized in NAME_SUFFIXES and start > lower_bound:
         start -= 1
 
@@ -597,7 +614,11 @@ def normalize_injury_report(parsed: ParsedInjuryReport) -> tuple[dict[str, Any],
     entry_rows: list[dict[str, Any]] = []
     for entry in parsed.entries:
         team_info = team_lookup.get(entry.team_abbreviation, {})
-        player_id = _resolve_player_id(entry.player_name, player_lookup)
+        player_id = _resolve_player_id(
+            entry.player_name,
+            player_lookup,
+            team_abbreviation=entry.team_abbreviation,
+        )
         entry_rows.append(
             {
                 "season": _season_for_game_date(entry.game_date),
@@ -683,56 +704,137 @@ def _load_team_lookup() -> dict[str, dict[str, str]]:
     return lookup
 
 
-def _load_player_lookup() -> dict[str, str]:
+def _load_player_lookup() -> PlayerLookupIndex:
     lookup: dict[str, str] = {}
+    player_team_lookup: dict[str, str] = {}
+    player_rows: list[PlayerLookupRow] = []
+
     with session_scope() as session:
         players = session.query(Player.player_id, Player.full_name).all()
+        latest_team_subquery = (
+            session.query(
+                HistoricalGameLog.player_id.label("player_id"),
+                func.max(HistoricalGameLog.game_date).label("latest_game_date"),
+            )
+            .group_by(HistoricalGameLog.player_id)
+            .subquery()
+        )
+        latest_team_rows = (
+            session.query(HistoricalGameLog.player_id, HistoricalGameLog.team)
+            .join(
+                latest_team_subquery,
+                and_(
+                    HistoricalGameLog.player_id == latest_team_subquery.c.player_id,
+                    HistoricalGameLog.game_date == latest_team_subquery.c.latest_game_date,
+                ),
+            )
+            .all()
+        )
+
+    for player_id, team_abbreviation in latest_team_rows:
+        if player_id and team_abbreviation:
+            player_team_lookup.setdefault(str(player_id), str(team_abbreviation).upper())
+
     for player_id, full_name in players:
-        for candidate in _candidate_name_keys(full_name):
-            lookup.setdefault(candidate, player_id)
-    return lookup
+        normalized_name = normalize_name(full_name)
+        for candidate in candidate_name_keys(full_name):
+            lookup.setdefault(candidate, str(player_id))
+        player_rows.append(
+            PlayerLookupRow(
+                player_id=str(player_id),
+                full_name=str(full_name),
+                team_abbreviation=player_team_lookup.get(str(player_id)),
+                normalized_name=normalized_name,
+                tokens=tuple(normalized_name.split()),
+            )
+        )
+
+    return PlayerLookupIndex(
+        exact_lookup=lookup,
+        player_team_lookup=player_team_lookup,
+        player_rows=player_rows,
+    )
 
 
-def _get_player_lookup_cache() -> dict[str, str]:
+def _get_player_lookup_cache() -> PlayerLookupIndex:
     global PLAYER_LOOKUP_CACHE
     if PLAYER_LOOKUP_CACHE is None:
         try:
             PLAYER_LOOKUP_CACHE = _load_player_lookup()
         except Exception as exc:
             LOGGER.warning("Could not load player lookup cache for injury parser: %s", exc)
-            PLAYER_LOOKUP_CACHE = {}
+            PLAYER_LOOKUP_CACHE = PlayerLookupIndex(
+                exact_lookup={},
+                player_team_lookup={},
+                player_rows=[],
+            )
     return PLAYER_LOOKUP_CACHE
 
 
-def _resolve_player_id(player_name: str | None, lookup: dict[str, str]) -> str | None:
+def _resolve_player_id(
+    player_name: str | None,
+    lookup: PlayerLookupIndex,
+    *,
+    team_abbreviation: str | None = None,
+) -> str | None:
     if not player_name:
         return None
-    for candidate in _candidate_name_keys(player_name):
-        player_id = lookup.get(candidate)
+    for candidate in candidate_name_keys(player_name):
+        player_id = lookup.exact_lookup.get(candidate)
         if player_id is not None:
             return player_id
-    return None
+    normalized_name = normalize_name(player_name)
+    name_tokens = tuple(normalized_name.split())
+    if not name_tokens or not team_abbreviation:
+        return None
+
+    team_abbr = str(team_abbreviation).upper()
+    best_player_id: str | None = None
+    best_score = 0.0
+    for player_row in lookup.player_rows:
+        if player_row.team_abbreviation != team_abbr or not player_row.tokens:
+            continue
+        shared_tokens = set(name_tokens) & set(player_row.tokens)
+        score = len(shared_tokens) / max(len(name_tokens), len(player_row.tokens))
+        if round(score, 2) < 0.67 or score <= best_score:
+            continue
+        best_player_id = player_row.player_id
+        best_score = score
+    return best_player_id
 
 
-def _candidate_name_keys(name: str) -> list[str]:
-    normalized = _normalize_name(name)
-    if not normalized:
-        return []
-    keys = [normalized]
-    tokens = normalized.split()
-    while tokens and tokens[-1] in NAME_SUFFIXES:
-        tokens = tokens[:-1]
-        if tokens:
-            candidate = " ".join(tokens)
-            if candidate not in keys:
-                keys.append(candidate)
-    return keys
+def backfill_injury_entry_player_ids() -> dict[str, int]:
+    """Re-resolve player_id for all player-named entries that are still NULL."""
+    player_lookup = _load_player_lookup()
+    with session_scope() as session:
+        rows = (
+            session.query(OfficialInjuryReportEntry)
+            .filter(
+                OfficialInjuryReportEntry.player_id.is_(None),
+                OfficialInjuryReportEntry.player_name.is_not(None),
+            )
+            .all()
+        )
+        resolved = 0
+        for row in rows:
+            player_id = _resolve_player_id(
+                row.player_name,
+                player_lookup,
+                team_abbreviation=row.team_abbreviation,
+            )
+            if not player_id:
+                continue
+            row.player_id = player_id
+            resolved += 1
+        still_null = sum(1 for row in rows if not row.player_id)
 
-
-def _normalize_name(name: str) -> str:
-    ascii_name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
-    cleaned = re.sub(r"[^a-zA-Z0-9 ]+", " ", ascii_name.lower())
-    return re.sub(r"\s+", " ", cleaned).strip()
+    global PLAYER_LOOKUP_CACHE
+    PLAYER_LOOKUP_CACHE = player_lookup
+    return {
+        "total_null": len(rows),
+        "resolved": resolved,
+        "still_null": still_null,
+    }
 
 
 def _season_for_game_date(game_date: date) -> str:

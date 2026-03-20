@@ -16,6 +16,7 @@ from ingestion.jobs import (
     repair_current_signal_snapshots,
     sync_daily_team_defense,
     sync_live_state_and_markets,
+    sync_odds_accumulation,
     sync_postgame_enrichment,
     sync_pregame_markets,
     sync_prop_snapshot_phase,
@@ -33,6 +34,7 @@ PREGAME_MARKET_EARLIEST_START_ET = time(hour=11, minute=0)
 OFFICIAL_INJURY_REPORT_INTERVAL_MINUTES = 15
 OFFICIAL_INJURY_REPORT_LOOKAHEAD = timedelta(hours=6)
 OFFICIAL_INJURY_REPORT_EARLIEST_START_ET = time(hour=8, minute=0)
+ODDS_ACCUMULATION_INTERVAL_MINUTES = 30
 
 PREGAME_PROP_SNAPSHOT_OFFSETS = {
     "early": timedelta(hours=4),
@@ -204,6 +206,27 @@ def run_signal_snapshot_repair_cycle(now_et: datetime | None = None) -> None:
     repair_current_signal_snapshots()
 
 
+def run_odds_accumulation_cycle(now_et: datetime | None = None) -> None:
+    games, _ = get_todays_games_bundle()
+    if not games:
+        logger.info("Skipping odds accumulation because there are no games on today's slate")
+        return
+
+    current_time = now_et or datetime.now(tz=SCHEDULER_TIMEZONE)
+    active_window = _select_pregame_market_window(current_time, games)
+    if active_window is None:
+        logger.info("Skipping odds accumulation outside the active slate window")
+        return
+
+    window_start, window_end = active_window
+    logger.info(
+        "Running odds accumulation for slate window %s to %s ET",
+        window_start.strftime("%Y-%m-%d %H:%M"),
+        window_end.strftime("%Y-%m-%d %H:%M"),
+    )
+    sync_odds_accumulation()
+
+
 def _select_due_injury_report_slot(now_et: datetime) -> tuple[date, time]:
     localized_now = now_et.astimezone(SCHEDULER_TIMEZONE) if now_et.tzinfo else now_et.replace(tzinfo=SCHEDULER_TIMEZONE)
     floored_minute = localized_now.minute - (localized_now.minute % OFFICIAL_INJURY_REPORT_INTERVAL_MINUTES)
@@ -328,6 +351,16 @@ def start_scheduler() -> BackgroundScheduler:
         hour="11-23",
         minute="0,15,30,45",
         id="scheduled_pregame_markets_cycle",
+        max_instances=1,
+        coalesce=True,
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        run_odds_accumulation_cycle,
+        "cron",
+        hour="11-23",
+        minute="0,30",
+        id="odds_accumulation_cycle",
         max_instances=1,
         coalesce=True,
         replace_existing=True,

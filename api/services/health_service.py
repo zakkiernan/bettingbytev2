@@ -17,7 +17,9 @@ from api.schemas.health import (
 from api.services import stats_signal_service
 from database.models import (
     Game,
+    OddsSnapshot,
     OfficialInjuryReport,
+    OfficialInjuryReportEntry,
     PlayerPropSnapshot,
     PregameContextSnapshot,
     RotationSyncState,
@@ -31,6 +33,7 @@ from ingestion.rotation_sync import (
 _STALE_CAPTURE_MINUTES = 60
 _SIGNAL_AUDIT_LAG_WARNING_MINUTES = 20
 _SIGNAL_AUDIT_LAG_CRITICAL_MINUTES = 60
+_PREGAME_ODDS_PHASES = ("pregame", "early", "late", "tip", "accumulation")
 
 
 def _today_window() -> tuple[datetime, datetime]:
@@ -42,8 +45,9 @@ def _today_window() -> tuple[datetime, datetime]:
 
 def _build_lines_health(db: Session, now: datetime, today_game_ids: list[str]) -> LinesHealth:
     """Summarise tonight's prop-line capture state."""
+    coverage = get_odds_snapshot_coverage(db)
     if not today_game_ids:
-        return LinesHealth()
+        return LinesHealth(**coverage)
 
     # All pregame snapshots for tonight's games
     snapshots = (
@@ -84,7 +88,43 @@ def _build_lines_health(db: Session, now: datetime, today_game_ids: list[str]) -
         stale_captures=stale_count,
         oldest_capture_age_minutes=oldest_age_minutes,
         sportsbook="fanduel",
+        **coverage,
     )
+
+
+def get_odds_snapshot_coverage(db: Session) -> dict[str, object]:
+    total_rows = int(db.execute(select(func.count(OddsSnapshot.id))).scalar() or 0)
+    phase_rows = db.execute(
+        select(OddsSnapshot.market_phase, func.count(OddsSnapshot.id))
+        .group_by(OddsSnapshot.market_phase)
+        .order_by(OddsSnapshot.market_phase.asc())
+    ).all()
+    date_range = db.execute(
+        select(func.min(OddsSnapshot.captured_at), func.max(OddsSnapshot.captured_at))
+    ).one()
+    multi_snapshot_games = int(
+        db.execute(
+            select(func.count())
+            .select_from(
+                select(OddsSnapshot.game_id)
+                .where(OddsSnapshot.market_phase.in_(_PREGAME_ODDS_PHASES))
+                .group_by(OddsSnapshot.game_id)
+                .having(func.count(OddsSnapshot.id) >= 2)
+                .subquery()
+            )
+        ).scalar()
+        or 0
+    )
+    distinct_games = int(db.execute(select(func.count(func.distinct(OddsSnapshot.game_id)))).scalar() or 0)
+
+    return {
+        "total_odds_snapshots": total_rows,
+        "odds_snapshot_rows_by_phase": {str(phase or "unknown"): int(count) for phase, count in phase_rows},
+        "odds_snapshot_start_date": date_range[0],
+        "odds_snapshot_end_date": date_range[1],
+        "games_with_multi_pregame_snapshots": multi_snapshot_games,
+        "average_odds_snapshots_per_game": round(total_rows / distinct_games, 2) if distinct_games else 0.0,
+    }
 
 
 def _build_rotations_health(db: Session) -> RotationsHealth:
@@ -141,16 +181,90 @@ def _build_injury_reports_health(db: Session) -> InjuryReportsHealth:
     reports_stored = int(
         db.execute(select(func.count(OfficialInjuryReport.id))).scalar() or 0
     )
-    from database.models import OfficialInjuryReportEntry
-    entries_stored = int(
-        db.execute(select(func.count(OfficialInjuryReportEntry.id))).scalar() or 0
-    )
-
     return InjuryReportsHealth(
         latest_report_date=str(latest_row) if latest_row else None,
         reports_stored=reports_stored,
-        entries_stored=entries_stored,
+        **get_injury_matching_coverage(db),
     )
+
+
+def get_injury_matching_coverage(db: Session) -> dict[str, object]:
+    entries_stored = int(db.execute(select(func.count(OfficialInjuryReportEntry.id))).scalar() or 0)
+    entries_with_player_id = int(
+        db.execute(
+            select(func.count(OfficialInjuryReportEntry.id)).where(
+                OfficialInjuryReportEntry.player_id.is_not(None)
+            )
+        ).scalar()
+        or 0
+    )
+    named_entries_stored = int(
+        db.execute(
+            select(func.count(OfficialInjuryReportEntry.id)).where(
+                OfficialInjuryReportEntry.player_name.is_not(None)
+            )
+        ).scalar()
+        or 0
+    )
+    named_entries_with_player_id = int(
+        db.execute(
+            select(func.count(OfficialInjuryReportEntry.id)).where(
+                OfficialInjuryReportEntry.player_name.is_not(None),
+                OfficialInjuryReportEntry.player_id.is_not(None),
+            )
+        ).scalar()
+        or 0
+    )
+    entries_without_player_id_by_team_rows = db.execute(
+        select(
+            OfficialInjuryReportEntry.team_abbreviation,
+            func.count(OfficialInjuryReportEntry.id),
+        )
+        .where(OfficialInjuryReportEntry.player_id.is_(None))
+        .group_by(OfficialInjuryReportEntry.team_abbreviation)
+        .order_by(func.count(OfficialInjuryReportEntry.id).desc())
+    ).all()
+    named_entries_without_player_id_by_team_rows = db.execute(
+        select(
+            OfficialInjuryReportEntry.team_abbreviation,
+            func.count(OfficialInjuryReportEntry.id),
+        )
+        .where(
+            OfficialInjuryReportEntry.player_id.is_(None),
+            OfficialInjuryReportEntry.player_name.is_not(None),
+        )
+        .group_by(OfficialInjuryReportEntry.team_abbreviation)
+        .order_by(func.count(OfficialInjuryReportEntry.id).desc())
+    ).all()
+    most_recent_match_stats_report_date = db.execute(
+        select(func.max(OfficialInjuryReportEntry.game_date))
+    ).scalar()
+
+    entries_without_player_id = entries_stored - entries_with_player_id
+    named_entries_without_player_id = named_entries_stored - named_entries_with_player_id
+    return {
+        "entries_stored": entries_stored,
+        "entries_with_player_id": entries_with_player_id,
+        "entries_without_player_id": entries_without_player_id,
+        "entry_match_pct": round(entries_with_player_id / entries_stored, 4) if entries_stored else 0.0,
+        "named_entries_stored": named_entries_stored,
+        "named_entries_with_player_id": named_entries_with_player_id,
+        "named_entries_without_player_id": named_entries_without_player_id,
+        "named_entry_match_pct": round(named_entries_with_player_id / named_entries_stored, 4) if named_entries_stored else 0.0,
+        "entries_without_player_id_by_team": {
+            str(team_abbreviation or "unknown"): int(count)
+            for team_abbreviation, count in entries_without_player_id_by_team_rows
+        },
+        "named_entries_without_player_id_by_team": {
+            str(team_abbreviation or "unknown"): int(count)
+            for team_abbreviation, count in named_entries_without_player_id_by_team_rows
+        },
+        "most_recent_match_stats_report_date": (
+            str(most_recent_match_stats_report_date)
+            if most_recent_match_stats_report_date is not None
+            else None
+        ),
+    }
 
 
 def _build_pregame_context_health(

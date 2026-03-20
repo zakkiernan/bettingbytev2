@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 import json
@@ -10,7 +10,16 @@ from typing import Literal
 from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
+from analytics.assists_model import project_pregame_assists
+from analytics.features_assists import PregameAssistsFeatures, build_pregame_assists_features
+from analytics.features_opportunity import PregameOpportunityFeatures
 from analytics.features_pregame import PregamePointsFeatures, build_pregame_points_features
+from analytics.features_rebounds import PregameReboundsFeatures, build_pregame_rebounds_features
+from analytics.features_threes import PregameThreesFeatures, build_pregame_threes_features
+from analytics.opportunity_model import project_pregame_opportunity
+from analytics.pregame_model import project_pregame_points
+from analytics.rebounds_model import project_pregame_rebounds
+from analytics.threes_model import project_pregame_threes
 from api.schemas.board import PropBoardMeta, PropBoardResponse, PropBoardRow, SignalReadiness
 from api.schemas.detail import FeatureSnapshot, GameLogEntry, InjuryEntry, OpportunityContext, PointsBreakdown, PropDetailResponse
 from api.schemas.edges import EdgeResponse
@@ -28,10 +37,12 @@ from database.models import (
     OfficialInjuryReportEntry,
     PlayerPropSnapshot,
     PregameContextSnapshot,
+    SignalAuditTrail,
     StatsSignalSnapshot,
 )
 
 POINTS_STAT_TYPE = "points"
+SUPPORTED_STAT_TYPES = ("points", "rebounds", "assists", "threes")
 CURRENT_SNAPSHOT_PHASE = "current"
 MIN_EDGE_TO_RECOMMEND = 1.5
 MIN_CONFIDENCE_TO_RECOMMEND = 0.55
@@ -41,6 +52,9 @@ MIN_RECENT_GAMES_FOR_RECOMMENDATION = 5
 MAX_SIGNAL_CAPTURE_AGE_MINUTES = 90
 INJURY_REPORT_REQUIRED_WINDOW_MINUTES = 240
 LOW_CONTEXT_CONFIDENCE_THRESHOLD = 0.45
+LOW_OPPORTUNITY_CONFIDENCE_THRESHOLD = 0.35
+STALE_ODDS_ARCHIVE_WARNING_MINUTES = 120
+MIN_NON_ZERO_STAT_GAMES = 5
 
 _RECENT_POINT_WEIGHTS: tuple[tuple[float, str], ...] = (
     (0.42, "season_points_avg"),
@@ -82,6 +96,46 @@ _INJURY_STATUS_LABELS = {
     "DOUBTFUL": "Doubtful",
     "QUESTIONABLE": "Questionable",
     "PROBABLE": "Probable",
+}
+
+_STAT_LOG_ATTRS = {
+    "points": "points",
+    "rebounds": "rebounds",
+    "assists": "assists",
+    "threes": "threes_made",
+}
+
+_STAT_REQUIRED_FEATURE_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
+    "points": (
+        ("season_points_avg", "season scoring average"),
+        ("last10_points_avg", "last-10 scoring average"),
+    ),
+    "rebounds": (
+        ("season_rebounds_avg", "season rebounds average"),
+        ("season_reb_pct", "season rebound rate"),
+    ),
+    "assists": (
+        ("season_assists_avg", "season assists average"),
+        ("season_ast_pct", "season assist rate"),
+    ),
+    "threes": (
+        ("season_threes_avg", "season threes average"),
+        ("season_3pa_rate", "season three-point attempt rate"),
+    ),
+}
+
+_STAT_FEATURE_BUILDERS = {
+    "points": build_pregame_points_features,
+    "rebounds": build_pregame_rebounds_features,
+    "assists": build_pregame_assists_features,
+    "threes": build_pregame_threes_features,
+}
+
+_STAT_PROJECTORS = {
+    "points": project_pregame_points,
+    "rebounds": project_pregame_rebounds,
+    "assists": project_pregame_assists,
+    "threes": project_pregame_threes,
 }
 
 
@@ -216,6 +270,12 @@ def _load_json_dict(payload: str | None) -> dict[str, object]:
     return loaded if isinstance(loaded, dict) else {}
 
 
+def _dump_json_list(values: list[str]) -> str | None:
+    if not values:
+        return None
+    return json.dumps(values, sort_keys=True)
+
+
 def _clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(value, upper))
 
@@ -266,8 +326,9 @@ def _title_case_status(status: str | None) -> str | None:
     return _INJURY_STATUS_LABELS.get(str(status).upper())
 
 
-def _recent_hit_rate(recent_logs: list[HistoricalGameLog], line: float) -> tuple[float | None, int]:
-    results = [float(row.points or 0.0) > line for row in recent_logs[:MAX_RECENT_LOGS]]
+def _recent_hit_rate(recent_logs: list[HistoricalGameLog], line: float, *, stat_type: str) -> tuple[float | None, int]:
+    stat_attr = _STAT_LOG_ATTRS.get(stat_type, "points")
+    results = [float(getattr(row, stat_attr) or 0.0) > line for row in recent_logs[:MAX_RECENT_LOGS]]
     if not results:
         return None, 0
     return sum(1 for hit in results if hit) / len(results), len(results)
@@ -294,13 +355,39 @@ def _minutes_to_tip(game: Game | None, *, evaluation_time: datetime) -> int | No
     return int((game.game_time_utc - evaluation_time).total_seconds() // 60)
 
 
+def _count_non_zero_recent_games(recent_logs: list[HistoricalGameLog], *, stat_type: str) -> int:
+    stat_attr = _STAT_LOG_ATTRS.get(stat_type)
+    if stat_attr is None:
+        return 0
+    return sum(
+        1
+        for row in recent_logs[:MAX_RECENT_LOGS]
+        if _value_or_zero(getattr(row, stat_attr, None)) > 0.0
+    )
+
+
+def _missing_stat_feature_labels(
+    feature: PregameOpportunityFeatures,
+    *,
+    stat_type: str,
+) -> list[str]:
+    missing_labels: list[str] = []
+    for attr, label in _STAT_REQUIRED_FEATURE_FIELDS.get(stat_type, ()):
+        if getattr(feature, attr, None) is None:
+            missing_labels.append(label)
+    return missing_labels
+
+
 def _build_signal_readiness(
     *,
     snapshot: PlayerPropSnapshot,
     game: Game | None,
-    feature: PregamePointsFeatures | None,
+    feature: PregameOpportunityFeatures | None,
+    recent_logs: list[HistoricalGameLog],
     recent_games_count: int,
+    opportunity_confidence: float | None,
     latest_injury_report_at: datetime | None,
+    latest_odds_snapshot_at: datetime | None,
     evaluation_time: datetime,
 ) -> SignalReadiness:
     blockers: list[str] = []
@@ -323,6 +410,18 @@ def _build_signal_readiness(
     ):
         blockers.append(f"Pregame line snapshot is {line_age_minutes} minutes old")
 
+    odds_archive_age_minutes = _age_minutes(evaluation_time, latest_odds_snapshot_at)
+    if (
+        minutes_to_tip is not None
+        and 0 < minutes_to_tip <= INJURY_REPORT_REQUIRED_WINDOW_MINUTES
+        and odds_archive_age_minutes is not None
+        and odds_archive_age_minutes > STALE_ODDS_ARCHIVE_WARNING_MINUTES
+    ):
+        warnings.append(
+            "Line snapshot may be stale"
+            f" - last captured {odds_archive_age_minutes} minutes ago."
+        )
+
     if (
         minutes_to_tip is not None
         and 0 < minutes_to_tip <= INJURY_REPORT_REQUIRED_WINDOW_MINUTES
@@ -331,6 +430,20 @@ def _build_signal_readiness(
         blockers.append("Official injury report is missing inside the pregame window")
 
     if feature is not None:
+        stat_type = snapshot.stat_type if snapshot.stat_type in SUPPORTED_STAT_TYPES else POINTS_STAT_TYPE
+        missing_labels = _missing_stat_feature_labels(feature, stat_type=stat_type)
+        if missing_labels:
+            blockers.append(
+                f"Missing {stat_type} feature data: {', '.join(missing_labels)}"
+            )
+
+        if stat_type != POINTS_STAT_TYPE:
+            non_zero_sample = _count_non_zero_recent_games(recent_logs, stat_type=stat_type)
+            if non_zero_sample < MIN_NON_ZERO_STAT_GAMES:
+                blockers.append(
+                    f"Only {non_zero_sample} recent non-zero {stat_type} games are available"
+                )
+
         context_confidence = _value_or_zero(feature.pregame_context_confidence)
         context_source = (feature.context_source or "none").strip().lower()
         if context_source == "none":
@@ -340,6 +453,11 @@ def _build_signal_readiness(
 
         if feature.pregame_context_confidence is not None and context_confidence < LOW_CONTEXT_CONFIDENCE_THRESHOLD:
             warnings.append(f"Pregame context confidence is only {context_confidence:.2f}")
+
+    if opportunity_confidence is not None and opportunity_confidence < LOW_OPPORTUNITY_CONFIDENCE_THRESHOLD:
+        blockers.append(
+            f"Opportunity confidence is only {float(opportunity_confidence):.2f}"
+        )
 
     status: Literal["ready", "limited", "blocked"] = "ready"
     if blockers:
@@ -362,17 +480,23 @@ def build_signal_readiness(
     *,
     snapshot: PlayerPropSnapshot,
     game: Game | None,
-    feature: PregamePointsFeatures | None,
+    feature: PregameOpportunityFeatures | None,
+    recent_logs: list[HistoricalGameLog],
     recent_games_count: int,
+    opportunity_confidence: float | None,
     latest_injury_report_at: datetime | None,
+    latest_odds_snapshot_at: datetime | None,
     evaluation_time: datetime,
 ) -> SignalReadiness:
     return _build_signal_readiness(
         snapshot=snapshot,
         game=game,
         feature=feature,
+        recent_logs=recent_logs,
         recent_games_count=recent_games_count,
+        opportunity_confidence=opportunity_confidence,
         latest_injury_report_at=latest_injury_report_at,
+        latest_odds_snapshot_at=latest_odds_snapshot_at,
         evaluation_time=evaluation_time,
     )
 
@@ -577,164 +701,157 @@ def _derive_key_factor(
     return None
 
 
-def build_stats_signal_profile(
-    features: PregamePointsFeatures,
+def _infer_stat_type_from_feature(features: PregameOpportunityFeatures) -> str:
+    if hasattr(features, "season_rebounds_avg"):
+        return "rebounds"
+    if hasattr(features, "season_assists_avg"):
+        return "assists"
+    if hasattr(features, "season_threes_avg"):
+        return "threes"
+    return "points"
+
+
+def _build_opportunity_context(
+    features: PregameOpportunityFeatures,
     *,
-    recent_logs: list[HistoricalGameLog],
     injury_entries: list[InjuryEntry],
-) -> StatsSignalProfile:
-    opportunity, opportunity_inputs = _build_opportunity_snapshot(features)
-    points_per_minute = _ppm(features)
-
-    base_points_avg = _weighted_average(
-        [(weight, _float_or_none(getattr(features, attr))) for weight, attr in _RECENT_POINT_WEIGHTS]
-    ) or 0.0
-    base_scoring = max(base_points_avg, opportunity_inputs["expected_minutes"] * points_per_minute)
-
-    recent_form_adjustment = 0.0
-    if features.last5_points_avg is not None and features.season_points_avg is not None:
-        recent_form_adjustment += (float(features.last5_points_avg) - float(features.season_points_avg)) * 0.18
-    if features.last10_points_avg is not None and features.season_points_avg is not None:
-        recent_form_adjustment += (float(features.last10_points_avg) - float(features.season_points_avg)) * 0.08
-    recent_form_adjustment = _clamp(recent_form_adjustment, -2.25, 2.25)
-
-    minutes_adjustment = 0.0
-    if features.season_minutes_avg is not None:
-        minutes_adjustment = (opportunity_inputs["expected_minutes"] - float(features.season_minutes_avg)) * points_per_minute * 0.30
-
-    usage_adjustment = 0.0
-    if features.season_usage_pct is not None:
-        usage_adjustment += (opportunity_inputs["expected_usage_pct"] - float(features.season_usage_pct)) * 7.0
-    if features.season_touches is not None:
-        usage_adjustment += (opportunity_inputs["expected_touches"] - float(features.season_touches)) * 0.01
-    usage_adjustment = _clamp(usage_adjustment, -2.0, 2.0)
-
-    efficiency_adjustment = 0.0
-    if features.last10_ts_pct is not None and features.season_ts_pct is not None:
-        efficiency_adjustment += (float(features.last10_ts_pct) - float(features.season_ts_pct)) * 6.0
-    if features.last10_fg_pct is not None and features.season_fg_pct is not None:
-        efficiency_adjustment += (float(features.last10_fg_pct) - float(features.season_fg_pct)) * 2.4
-    efficiency_adjustment = _clamp(efficiency_adjustment, -1.2, 1.2)
-
-    opponent_adjustment = 0.0
-    if features.opponent_def_rating is not None and features.league_avg_def_rating is not None:
-        opponent_adjustment = (float(features.league_avg_def_rating) - float(features.opponent_def_rating)) * 0.12
-    opponent_adjustment = _clamp(opponent_adjustment, -1.0, 1.0)
-
-    pace_adjustment = 0.0
-    if features.team_pace is not None and features.opponent_pace is not None and features.league_avg_pace is not None:
-        pace_adjustment = (((float(features.team_pace) + float(features.opponent_pace)) / 2.0) - float(features.league_avg_pace)) * 0.12
-    pace_adjustment = _clamp(pace_adjustment, -1.0, 1.0)
-
-    context_adjustment = 0.0
-    if features.is_home:
-        context_adjustment += 0.20
-    if features.back_to_back:
-        context_adjustment -= 0.55
-    if features.days_rest is not None and features.days_rest >= 2:
-        context_adjustment += min(features.days_rest - 1, 2) * 0.10
-    context_adjustment += opportunity_inputs["vacated_minutes_bonus"] * 0.18
-    context_adjustment += opportunity_inputs["vacated_usage_bonus"] * 12.0
-    context_adjustment = _clamp(context_adjustment, -1.2, 1.5)
-
-    projected_value = max(
-        0.0,
-        base_scoring
-        + recent_form_adjustment
-        + minutes_adjustment
-        + usage_adjustment
-        + efficiency_adjustment
-        + opponent_adjustment
-        + pace_adjustment
-        + context_adjustment,
-    )
-    edge_over = projected_value - float(features.line)
-    edge_under = -edge_over
-    over_probability, under_probability = _line_probability(projected_value, float(features.line), features.last10_points_std)
-
-    recent_hit_rate, recent_games_count = _recent_hit_rate(recent_logs, float(features.line))
-    sample_strength = _clamp(features.sample_size / 12.0, 0.0, 1.0)
-    points_stability = 1.0 - _clamp(_value_or_zero(features.last10_points_std) / 12.0, 0.0, 1.0)
-    minutes_trend_stability = 1.0 - _clamp(
-        abs(_value_or_zero(features.last5_minutes_avg) - _value_or_zero(features.last10_minutes_avg)) / 6.0,
-        0.0,
-        1.0,
-    )
-    recent_support = 0.0 if recent_hit_rate is None else _clamp(abs(recent_hit_rate - 0.5) * 2.0, 0.0, 1.0)
-    confidence = _clamp(
-        0.22 * sample_strength
-        + 0.18 * points_stability
-        + 0.14 * opportunity.role_stability
-        + 0.12 * opportunity.opportunity_confidence
-        + 0.10 * _clamp(opportunity.opportunity_score, 0.0, 1.0)
-        + 0.12 * _clamp(abs(edge_over) / 4.0, 0.0, 1.0)
-        + 0.12 * recent_support
-        + 0.10 * minutes_trend_stability,
-        0.0,
-        1.0,
+    opportunity_projection: object,
+) -> OpportunityContext:
+    breakdown = opportunity_projection.breakdown
+    return OpportunityContext(
+        expected_minutes=round(float(breakdown.expected_minutes), 3),
+        season_minutes_avg=round(_value_or_zero(features.season_minutes_avg), 3),
+        expected_usage_pct=round(float(breakdown.expected_usage_pct), 4),
+        expected_start_rate=round(float(breakdown.expected_start_rate), 4),
+        expected_close_rate=round(float(breakdown.expected_close_rate), 4),
+        role_stability=round(float(breakdown.role_stability), 4),
+        opportunity_score=round(float(breakdown.opportunity_score), 4),
+        opportunity_confidence=round(float(breakdown.confidence), 4),
+        availability_modifier=round(float(breakdown.availability_modifier), 4),
+        vacated_minutes_bonus=round(float(breakdown.vacated_minutes_bonus), 3),
+        vacated_usage_bonus=round(float(breakdown.vacated_usage_bonus), 4),
+        injury_entries=injury_entries,
     )
 
-    recommended_side: Literal["OVER", "UNDER"] | None = None
-    if features.official_available is not False and _value_or_zero(features.late_scratch_risk) < 0.75:
-        if edge_over >= MIN_EDGE_TO_RECOMMEND and over_probability >= MIN_PROBABILITY_TO_RECOMMEND and confidence >= MIN_CONFIDENCE_TO_RECOMMEND:
-            recommended_side = "OVER"
-        elif edge_under >= MIN_EDGE_TO_RECOMMEND and under_probability >= MIN_PROBABILITY_TO_RECOMMEND and confidence >= MIN_CONFIDENCE_TO_RECOMMEND:
-            recommended_side = "UNDER"
 
-    opportunity.injury_entries = injury_entries
-    feature_snapshot = FeatureSnapshot(
+def _build_feature_snapshot(features: PregameOpportunityFeatures, *, stat_type: str) -> FeatureSnapshot:
+    return FeatureSnapshot(
+        stat_type=stat_type,
         team_abbreviation=features.team_abbreviation or "",
         opponent_abbreviation=features.opponent_abbreviation or "",
         is_home=bool(features.is_home),
         days_rest=features.days_rest,
         back_to_back=bool(features.back_to_back),
         sample_size=int(features.sample_size or 0),
-        season_points_avg=_float_or_none(features.season_points_avg),
-        last10_points_avg=_float_or_none(features.last10_points_avg),
-        last5_points_avg=_float_or_none(features.last5_points_avg),
+        season_points_avg=_float_or_none(getattr(features, "season_points_avg", None)),
+        last10_points_avg=_float_or_none(getattr(features, "last10_points_avg", None)),
+        last5_points_avg=_float_or_none(getattr(features, "last5_points_avg", None)),
+        season_rebounds_avg=_float_or_none(getattr(features, "season_rebounds_avg", None)),
+        last10_rebounds_avg=_float_or_none(getattr(features, "last10_rebounds_avg", None)),
+        last5_rebounds_avg=_float_or_none(getattr(features, "last5_rebounds_avg", None)),
+        season_assists_avg=_float_or_none(getattr(features, "season_assists_avg", None)),
+        last10_assists_avg=_float_or_none(getattr(features, "last10_assists_avg", None)),
+        last5_assists_avg=_float_or_none(getattr(features, "last5_assists_avg", None)),
+        season_threes_avg=_float_or_none(getattr(features, "season_threes_avg", None)),
+        last10_threes_avg=_float_or_none(getattr(features, "last10_threes_avg", None)),
+        last5_threes_avg=_float_or_none(getattr(features, "last5_threes_avg", None)),
         season_minutes_avg=_float_or_none(features.season_minutes_avg),
         last10_minutes_avg=_float_or_none(features.last10_minutes_avg),
         last5_minutes_avg=_float_or_none(features.last5_minutes_avg),
         season_usage_pct=_float_or_none(features.season_usage_pct),
+        season_reb_pct=_float_or_none(getattr(features, "season_reb_pct", None)),
+        season_ast_pct=_float_or_none(getattr(features, "season_ast_pct", None)),
+        season_3pa_rate=_float_or_none(getattr(features, "season_3pa_rate", None)),
         opponent_def_rating=_float_or_none(features.opponent_def_rating),
         opponent_pace=_float_or_none(features.opponent_pace),
         team_pace=_float_or_none(features.team_pace),
         context_source=features.context_source,
     )
 
-    key_factor = _derive_key_factor(
-        features,
-        opportunity_score=opportunity.opportunity_score,
-        recent_hit_rate=recent_hit_rate,
-        edge_over=edge_over,
-    )
-    breakdown = PointsBreakdown(
-        base_scoring=round(base_scoring, 3),
-        recent_form_adjustment=round(recent_form_adjustment, 3),
-        minutes_adjustment=round(minutes_adjustment, 3),
-        usage_adjustment=round(usage_adjustment, 3),
-        efficiency_adjustment=round(efficiency_adjustment, 3),
-        opponent_adjustment=round(opponent_adjustment, 3),
-        pace_adjustment=round(pace_adjustment, 3),
-        context_adjustment=round(context_adjustment, 3),
-        expected_minutes=round(opportunity.expected_minutes, 3),
-        expected_usage_pct=round(opportunity.expected_usage_pct, 4),
-        points_per_minute=round(points_per_minute, 3),
-        projected_points=round(projected_value, 3),
-    )
+
+def _build_breakdown_schema(stat_type: str, breakdown_dict: dict[str, float]) -> PointsBreakdown:
+    payload = {
+        key: value
+        for key, value in breakdown_dict.items()
+        if key in PointsBreakdown.model_fields
+    }
+    if stat_type == "points" and "projected_points" not in payload:
+        payload["projected_points"] = breakdown_dict.get("projected_points", breakdown_dict.get("projected_value", 0.0))
+    if stat_type == "rebounds" and "projected_rebounds" not in payload:
+        payload["projected_rebounds"] = breakdown_dict.get("projected_rebounds", breakdown_dict.get("projected_value", 0.0))
+    if stat_type == "assists" and "projected_assists" not in payload:
+        payload["projected_assists"] = breakdown_dict.get("projected_assists", breakdown_dict.get("projected_value", 0.0))
+    if stat_type == "threes" and "projected_threes" not in payload:
+        payload["projected_threes"] = breakdown_dict.get("projected_threes", breakdown_dict.get("projected_value", 0.0))
+    return PointsBreakdown(**payload)
+
+
+def _generic_key_factor(stat_type: str, breakdown_dict: dict[str, float]) -> str | None:
+    label_map = {
+        "recent_form_adjustment": "Recent form is supportive",
+        "minutes_adjustment": "Projected minutes are driving the edge",
+        "usage_adjustment": "Usage context is driving the edge",
+        "rebound_rate_adjustment": "Rebounding rate trend is driving the edge",
+        "playmaking_adjustment": "Playmaking role is driving the edge",
+        "volume_adjustment": "Three-point volume trend is driving the edge",
+        "opponent_adjustment": "Matchup context is driving the edge",
+        "pace_adjustment": "Pace environment is driving the edge",
+        "context_adjustment": "Teammate absences are creating role pressure",
+    }
+    candidate = None
+    candidate_value = 0.0
+    for key, label in label_map.items():
+        value = abs(float(breakdown_dict.get(key, 0.0) or 0.0))
+        if value > candidate_value:
+            candidate = label
+            candidate_value = value
+    if candidate_value < 0.15 and stat_type != "points":
+        return "Shared opportunity context is doing most of the work"
+    return candidate
+
+
+def build_stats_signal_profile(
+    features: PregameOpportunityFeatures,
+    *,
+    recent_logs: list[HistoricalGameLog],
+    injury_entries: list[InjuryEntry],
+    stat_type: str | None = None,
+) -> StatsSignalProfile:
+    resolved_stat_type = stat_type or _infer_stat_type_from_feature(features)
+    opportunity_projection = project_pregame_opportunity(features)
+    projection = _STAT_PROJECTORS[resolved_stat_type](features, opportunity_projection=opportunity_projection)
+    breakdown_dict = projection.breakdown.to_dict()
+
+    recent_hit_rate, recent_games_count = _recent_hit_rate(recent_logs, float(features.line), stat_type=resolved_stat_type)
+    opportunity = _build_opportunity_context(features, injury_entries=injury_entries, opportunity_projection=opportunity_projection)
+    feature_snapshot = _build_feature_snapshot(features, stat_type=resolved_stat_type)
+
+    recommended_side = projection.recommended_side
+    if features.official_available is False or _value_or_zero(features.late_scratch_risk) >= 0.75:
+        recommended_side = None
+
+    if resolved_stat_type == "points" and isinstance(features, PregamePointsFeatures):
+        key_factor = _derive_key_factor(
+            features,
+            opportunity_score=opportunity.opportunity_score,
+            recent_hit_rate=recent_hit_rate,
+            edge_over=projection.edge_over,
+        )
+    else:
+        key_factor = _generic_key_factor(resolved_stat_type, breakdown_dict)
 
     return StatsSignalProfile(
-        projected_value=round(projected_value, 3),
-        edge_over=round(edge_over, 3),
-        edge_under=round(edge_under, 3),
-        over_probability=round(over_probability, 4),
-        under_probability=round(under_probability, 4),
-        confidence=round(confidence, 4),
+        projected_value=round(float(projection.projected_value), 3),
+        edge_over=round(float(projection.edge_over), 3),
+        edge_under=round(float(projection.edge_under), 3),
+        over_probability=round(float(projection.over_probability), 4),
+        under_probability=round(float(projection.under_probability), 4),
+        confidence=round(float(projection.confidence), 4),
         recommended_side=recommended_side,
         recent_hit_rate=round(recent_hit_rate, 4) if recent_hit_rate is not None else None,
         recent_games_count=recent_games_count,
         key_factor=key_factor,
-        breakdown=breakdown,
+        breakdown=_build_breakdown_schema(resolved_stat_type, breakdown_dict),
         opportunity=opportunity,
         feature_snapshot=feature_snapshot,
         source_context_captured_at=features.captured_at if features.pregame_context_attached else None,
@@ -749,10 +866,12 @@ def _build_fallback_profile(
     recent_logs: list[HistoricalGameLog],
     injury_entries: list[InjuryEntry],
 ) -> StatsSignalProfile:
-    recent_points = [float(row.points or 0.0) for row in recent_logs[:MAX_RECENT_LOGS]]
+    stat_type = snapshot.stat_type if snapshot.stat_type in SUPPORTED_STAT_TYPES else POINTS_STAT_TYPE
+    stat_attr = _STAT_LOG_ATTRS.get(stat_type, "points")
+    recent_values = [float(getattr(row, stat_attr) or 0.0) for row in recent_logs[:MAX_RECENT_LOGS]]
     recent_minutes = [float(row.minutes or 0.0) for row in recent_logs[:MAX_RECENT_LOGS] if row.minutes is not None]
-    projected_value = sum(recent_points) / len(recent_points) if recent_points else float(snapshot.line)
-    recent_hit_rate, recent_games_count = _recent_hit_rate(recent_logs, float(snapshot.line))
+    projected_value = sum(recent_values) / len(recent_values) if recent_values else float(snapshot.line)
+    recent_hit_rate, recent_games_count = _recent_hit_rate(recent_logs, float(snapshot.line), stat_type=stat_type)
     over_probability, under_probability = _line_probability(projected_value, float(snapshot.line), None)
     edge_over = projected_value - float(snapshot.line)
     sample_strength = _clamp(recent_games_count / 10.0, 0.0, 1.0)
@@ -779,15 +898,25 @@ def _build_fallback_profile(
         injury_entries=injury_entries,
     )
     feature_snapshot = FeatureSnapshot(
+        stat_type=stat_type,
         team_abbreviation=snapshot.team or "",
         opponent_abbreviation=snapshot.opponent or "",
         is_home=bool(game and game.home_team_abbreviation == snapshot.team),
         days_rest=None,
         back_to_back=False,
         sample_size=recent_games_count,
-        season_points_avg=round(projected_value, 3),
-        last10_points_avg=round(projected_value, 3),
-        last5_points_avg=round(projected_value, 3),
+        season_points_avg=round(projected_value, 3) if stat_type == "points" else None,
+        last10_points_avg=round(projected_value, 3) if stat_type == "points" else None,
+        last5_points_avg=round(projected_value, 3) if stat_type == "points" else None,
+        season_rebounds_avg=round(projected_value, 3) if stat_type == "rebounds" else None,
+        last10_rebounds_avg=round(projected_value, 3) if stat_type == "rebounds" else None,
+        last5_rebounds_avg=round(projected_value, 3) if stat_type == "rebounds" else None,
+        season_assists_avg=round(projected_value, 3) if stat_type == "assists" else None,
+        last10_assists_avg=round(projected_value, 3) if stat_type == "assists" else None,
+        last5_assists_avg=round(projected_value, 3) if stat_type == "assists" else None,
+        season_threes_avg=round(projected_value, 3) if stat_type == "threes" else None,
+        last10_threes_avg=round(projected_value, 3) if stat_type == "threes" else None,
+        last5_threes_avg=round(projected_value, 3) if stat_type == "threes" else None,
         season_minutes_avg=average_minutes or None,
         last10_minutes_avg=average_minutes or None,
         last5_minutes_avg=average_minutes or None,
@@ -797,20 +926,30 @@ def _build_fallback_profile(
         team_pace=None,
         context_source="none",
     )
-    breakdown = PointsBreakdown(
-        base_scoring=round(projected_value, 3),
-        recent_form_adjustment=0.0,
-        minutes_adjustment=0.0,
-        usage_adjustment=0.0,
-        efficiency_adjustment=0.0,
-        opponent_adjustment=0.0,
-        pace_adjustment=0.0,
-        context_adjustment=0.0,
-        expected_minutes=opportunity.expected_minutes,
-        expected_usage_pct=0.0,
-        points_per_minute=round(projected_value / average_minutes, 3) if average_minutes > 0 else 0.0,
-        projected_points=round(projected_value, 3),
-    )
+    breakdown_payload = {
+        "recent_form_adjustment": 0.0,
+        "minutes_adjustment": 0.0,
+        "usage_adjustment": 0.0,
+        "rebound_rate_adjustment": 0.0,
+        "playmaking_adjustment": 0.0,
+        "volume_adjustment": 0.0,
+        "efficiency_adjustment": 0.0,
+        "opponent_adjustment": 0.0,
+        "pace_adjustment": 0.0,
+        "context_adjustment": 0.0,
+        "expected_minutes": opportunity.expected_minutes,
+        "expected_usage_pct": 0.0,
+    }
+    rate_value = round(projected_value / average_minutes, 3) if average_minutes > 0 else 0.0
+    if stat_type == "points":
+        breakdown_payload.update(base_scoring=round(projected_value, 3), points_per_minute=rate_value, projected_points=round(projected_value, 3))
+    elif stat_type == "rebounds":
+        breakdown_payload.update(base_rebounding=round(projected_value, 3), rebounds_per_minute=rate_value, projected_rebounds=round(projected_value, 3))
+    elif stat_type == "assists":
+        breakdown_payload.update(base_playmaking=round(projected_value, 3), assists_per_minute=rate_value, projected_assists=round(projected_value, 3))
+    else:
+        breakdown_payload.update(base_shooting=round(projected_value, 3), threes_per_minute=rate_value, projected_threes=round(projected_value, 3))
+    breakdown = PointsBreakdown(**breakdown_payload)
     return StatsSignalProfile(
         projected_value=round(projected_value, 3),
         edge_over=round(edge_over, 3),
@@ -868,11 +1007,13 @@ def _load_recent_logs_by_player(db: Session, player_ids: list[str]) -> dict[str,
     return dict(logs_by_player)
 
 
-def _load_features_by_snapshot(snapshots: list[PlayerPropSnapshot]) -> dict[tuple[datetime, str, str, str], PregamePointsFeatures]:
-    features_by_snapshot: dict[tuple[datetime, str, str, str], PregamePointsFeatures] = {}
+def _load_features_by_snapshot(snapshots: list[PlayerPropSnapshot]) -> dict[tuple[datetime, str, str, str], PregameOpportunityFeatures]:
+    features_by_snapshot: dict[tuple[datetime, str, str, str], PregameOpportunityFeatures] = {}
+    stat_types = sorted({snapshot.stat_type for snapshot in snapshots if snapshot.stat_type in _STAT_FEATURE_BUILDERS})
     for captured_at in sorted({snapshot.captured_at for snapshot in snapshots}):
-        for feature in build_pregame_points_features(captured_at=captured_at):
-            features_by_snapshot[(captured_at, feature.game_id, feature.player_id, POINTS_STAT_TYPE)] = feature
+        for stat_type in stat_types:
+            for feature in _STAT_FEATURE_BUILDERS[stat_type](captured_at=captured_at):
+                features_by_snapshot[(captured_at, feature.game_id, feature.player_id, stat_type)] = feature
     return features_by_snapshot
 
 
@@ -965,6 +1106,43 @@ def _load_latest_injury_reports_by_date(
     }
 
 
+def _load_latest_odds_snapshot_times(
+    db: Session,
+    *,
+    snapshots: list[PlayerPropSnapshot],
+) -> dict[tuple[str, str, str], datetime]:
+    if not snapshots:
+        return {}
+
+    game_ids = sorted({snapshot.game_id for snapshot in snapshots})
+    player_ids = sorted({snapshot.player_id for snapshot in snapshots})
+    stat_types = sorted({snapshot.stat_type for snapshot in snapshots})
+    rows = db.execute(
+        select(
+            OddsSnapshot.game_id,
+            OddsSnapshot.player_id,
+            OddsSnapshot.stat_type,
+            func.max(OddsSnapshot.captured_at).label("latest_captured_at"),
+        )
+        .where(
+            OddsSnapshot.game_id.in_(game_ids),
+            OddsSnapshot.player_id.in_(player_ids),
+            OddsSnapshot.stat_type.in_(stat_types),
+            OddsSnapshot.market_phase != "live",
+        )
+        .group_by(
+            OddsSnapshot.game_id,
+            OddsSnapshot.player_id,
+            OddsSnapshot.stat_type,
+        )
+    ).all()
+    return {
+        (row.game_id, row.player_id, row.stat_type): row.latest_captured_at
+        for row in rows
+        if row.latest_captured_at is not None
+    }
+
+
 def _build_cards_from_snapshots(
     db: Session,
     snapshots: list[PlayerPropSnapshot],
@@ -983,6 +1161,7 @@ def _build_cards_from_snapshots(
     }
     features_by_snapshot = _load_features_by_snapshot(snapshots)
     recent_logs_by_player = _load_recent_logs_by_player(db, [snapshot.player_id for snapshot in snapshots])
+    latest_odds_snapshot_at_by_key = _load_latest_odds_snapshot_times(db, snapshots=snapshots)
 
     team_dates: set[tuple[str, date]] = set()
     for snapshot in snapshots:
@@ -1007,13 +1186,23 @@ def _build_cards_from_snapshots(
         if feature is None:
             profile = _build_fallback_profile(snapshot, game, recent_logs=recent_logs, injury_entries=injury_entries)
         else:
-            profile = build_stats_signal_profile(feature, recent_logs=recent_logs, injury_entries=injury_entries)
+            profile = build_stats_signal_profile(
+                feature,
+                recent_logs=recent_logs,
+                injury_entries=injury_entries,
+                stat_type=snapshot.stat_type,
+            )
         profile.readiness = _build_signal_readiness(
             snapshot=snapshot,
             game=game,
             feature=feature,
+            recent_logs=recent_logs,
             recent_games_count=profile.recent_games_count,
+            opportunity_confidence=profile.opportunity.opportunity_confidence,
             latest_injury_report_at=injury_reports_by_date.get(game_date) if game_date is not None else None,
+            latest_odds_snapshot_at=latest_odds_snapshot_at_by_key.get(
+                (snapshot.game_id, snapshot.player_id, snapshot.stat_type)
+            ),
             evaluation_time=evaluation_time,
         )
         if profile.readiness.blockers:
@@ -1070,6 +1259,28 @@ def _serialize_signal_snapshot(card: StatsSignalCard, *, created_at: datetime) -
     )
 
 
+def _serialize_signal_audit_row(card: StatsSignalCard, *, created_at: datetime) -> SignalAuditTrail:
+    readiness = card.profile.readiness
+    return SignalAuditTrail(
+        game_id=card.snapshot.game_id,
+        player_id=card.snapshot.player_id,
+        stat_type=card.snapshot.stat_type,
+        snapshot_phase=card.snapshot.snapshot_phase,
+        line=float(card.snapshot.line),
+        projected_value=card.profile.projected_value,
+        edge=round(card.profile.projected_value - float(card.snapshot.line), 3),
+        confidence=card.profile.confidence,
+        recommended_side=card.profile.recommended_side,
+        readiness_status=readiness.status,
+        blockers_json=_dump_json_list(readiness.blockers),
+        warnings_json=_dump_json_list(readiness.warnings),
+        breakdown_json=_dump_model_json(card.profile.breakdown),
+        source_context_captured_at=card.profile.source_context_captured_at,
+        source_injury_report_at=card.profile.source_injury_report_at,
+        captured_at=created_at,
+    )
+
+
 def persist_current_signal_snapshots() -> dict[str, int]:
     generated_at = _utcnow()
     with session_scope() as db:
@@ -1077,6 +1288,7 @@ def persist_current_signal_snapshots() -> dict[str, int]:
         if not snapshots:
             return {
                 "signal_snapshots": 0,
+                "signal_audit_rows": 0,
                 "signal_games": 0,
                 "signal_recommendations": 0,
                 "signal_blocked": 0,
@@ -1084,9 +1296,11 @@ def persist_current_signal_snapshots() -> dict[str, int]:
 
         cards = _build_cards_from_snapshots(db, snapshots, evaluation_time=generated_at)
         rows = [_serialize_signal_snapshot(card, created_at=generated_at) for card in cards]
-        db.add_all(rows)
+        audit_rows = [_serialize_signal_audit_row(card, created_at=generated_at) for card in cards]
+        db.add_all(rows + audit_rows)
         return {
             "signal_snapshots": len(rows),
+            "signal_audit_rows": len(audit_rows),
             "signal_games": len({row.game_id for row in rows}),
             "signal_recommendations": sum(1 for row in rows if row.recommended_side is not None),
             "signal_blocked": sum(1 for row in rows if row.readiness_status == "blocked"),
@@ -1108,10 +1322,44 @@ def _load_latest_signal_audit_metrics(
         ).where(
             StatsSignalSnapshot.game_id.in_(game_ids),
             StatsSignalSnapshot.snapshot_phase == CURRENT_SNAPSHOT_PHASE,
-            StatsSignalSnapshot.stat_type == POINTS_STAT_TYPE,
+            StatsSignalSnapshot.stat_type.in_(SUPPORTED_STAT_TYPES),
         )
     ).one()
     return latest_persisted_at, latest_source_prop_captured_at
+
+
+def _load_signal_audit_archive_summary(db: Session) -> dict[str, object]:
+    total_rows = int(db.execute(select(func.count(SignalAuditTrail.id))).scalar() or 0)
+    phase_rows = db.execute(
+        select(SignalAuditTrail.snapshot_phase, func.count(SignalAuditTrail.id))
+        .group_by(SignalAuditTrail.snapshot_phase)
+        .order_by(SignalAuditTrail.snapshot_phase.asc())
+    ).all()
+    games_with_full_coverage = int(
+        db.execute(
+            select(func.count())
+            .select_from(
+                select(SignalAuditTrail.game_id)
+                .where(SignalAuditTrail.snapshot_phase.in_(("early", "late", "tip")))
+                .group_by(SignalAuditTrail.game_id)
+                .having(func.count(func.distinct(SignalAuditTrail.snapshot_phase)) >= 3)
+                .subquery()
+            )
+        ).scalar()
+        or 0
+    )
+    most_recent_capture_at = db.execute(
+        select(func.max(SignalAuditTrail.captured_at))
+    ).scalar()
+    return {
+        "total_audit_rows": total_rows,
+        "audit_rows_by_snapshot_phase": {
+            str(phase or "unknown"): int(count)
+            for phase, count in phase_rows
+        },
+        "games_with_full_audit_coverage": games_with_full_coverage,
+        "most_recent_audit_capture_at": most_recent_capture_at,
+    }
 
 
 def repair_current_signal_snapshots(*, force: bool = False) -> dict[str, int | str | None]:
@@ -1121,6 +1369,7 @@ def repair_current_signal_snapshots(*, force: bool = False) -> dict[str, int | s
         if not snapshots:
             return {
                 "signal_snapshots": 0,
+                "signal_audit_rows": 0,
                 "signal_games": 0,
                 "signal_recommendations": 0,
                 "signal_blocked": 0,
@@ -1148,6 +1397,7 @@ def repair_current_signal_snapshots(*, force: bool = False) -> dict[str, int | s
         ):
             return {
                 "signal_snapshots": 0,
+                "signal_audit_rows": 0,
                 "signal_games": len(scoped_game_ids),
                 "signal_recommendations": 0,
                 "signal_blocked": 0,
@@ -1158,9 +1408,11 @@ def repair_current_signal_snapshots(*, force: bool = False) -> dict[str, int | s
 
         cards = _build_cards_from_snapshots(db, snapshots, evaluation_time=generated_at)
         rows = [_serialize_signal_snapshot(card, created_at=generated_at) for card in cards]
-        db.add_all(rows)
+        audit_rows = [_serialize_signal_audit_row(card, created_at=generated_at) for card in cards]
+        db.add_all(rows + audit_rows)
         return {
             "signal_snapshots": len(rows),
+            "signal_audit_rows": len(audit_rows),
             "signal_games": len({row.game_id for row in rows}),
             "signal_recommendations": sum(1 for row in rows if row.recommended_side is not None),
             "signal_blocked": sum(1 for row in rows if row.readiness_status == "blocked"),
@@ -1174,7 +1426,7 @@ def _base_snapshot_query():
     return select(PlayerPropSnapshot).where(
         PlayerPropSnapshot.is_live == False,  # noqa: E712
         PlayerPropSnapshot.snapshot_phase == CURRENT_SNAPSHOT_PHASE,
-        PlayerPropSnapshot.stat_type == POINTS_STAT_TYPE,
+        PlayerPropSnapshot.stat_type.in_(SUPPORTED_STAT_TYPES),
     )
 
 
@@ -1214,6 +1466,7 @@ def get_prop_board_response(
     db: Session,
     *,
     game_id: str | None = None,
+    stat_type: str | None = None,
     recommended_only: bool = False,
     min_confidence: float | None = None,
 ) -> PropBoardResponse:
@@ -1225,11 +1478,15 @@ def get_prop_board_response(
                 total_count=0,
                 game_count=0 if game_id is None else len(scoped_game_ids),
                 updated_at=None,
+                stat_types_available=[],
             ),
         )
 
     cards = _build_cards_from_snapshots(db, snapshots, evaluation_time=_utcnow())
     rows = [card.to_board_row() for card in cards]
+    available_stat_types = sorted({row.stat_type for row in rows})
+    if stat_type is not None:
+        rows = [row for row in rows if row.stat_type == stat_type]
     if recommended_only:
         rows = [row for row in rows if row.recommended_side is not None]
     if min_confidence is not None:
@@ -1250,13 +1507,14 @@ def get_prop_board_response(
             total_count=len(rows),
             game_count=total_game_count,
             updated_at=updated_at,
+            stat_types_available=available_stat_types,
         ),
     )
 
 
 def get_prop_detail_response(db: Session, snapshot_id: int) -> PropDetailResponse | None:
     snapshot = db.get(PlayerPropSnapshot, snapshot_id)
-    if snapshot is None or snapshot.is_live or snapshot.stat_type != POINTS_STAT_TYPE:
+    if snapshot is None or snapshot.is_live or snapshot.stat_type not in SUPPORTED_STAT_TYPES:
         return None
     cards = _build_cards_from_snapshots(db, [snapshot], evaluation_time=_utcnow())
     if not cards:
@@ -1325,10 +1583,18 @@ def get_edges_today_response(db: Session) -> list[EdgeResponse]:
 
 def build_signal_run_health(db: Session, today_game_ids: list[str]) -> SignalRunHealth:
     snapshots = _load_current_snapshots(db, game_ids=today_game_ids)
+    audit_summary = _load_signal_audit_archive_summary(db)
     if not snapshots:
-        return SignalRunHealth()
+        return SignalRunHealth(**audit_summary)
 
     rows = [card.to_board_row() for card in _build_cards_from_snapshots(db, snapshots, evaluation_time=_utcnow())]
+    signals_by_stat_type = Counter(row.stat_type for row in rows)
+    blocked_by_stat_type = Counter(row.stat_type for row in rows if row.readiness.status == "blocked")
+    blocked_reasons = Counter(
+        blocker
+        for row in rows
+        for blocker in row.readiness.blockers
+    )
     latest_current_capture = max((snapshot.captured_at for snapshot in snapshots), default=None)
     latest_persisted_at, latest_audit_source_prop_captured_at = _load_latest_signal_audit_metrics(
         db,
@@ -1342,6 +1608,9 @@ def build_signal_run_health(db: Session, today_game_ids: list[str]) -> SignalRun
         signals_limited=sum(1 for row in rows if row.readiness.status == "limited"),
         signals_blocked=sum(1 for row in rows if row.readiness.status == "blocked"),
         signals_using_fallback=sum(1 for row in rows if row.readiness.using_fallback),
+        signals_by_stat_type=dict(sorted(signals_by_stat_type.items())),
+        blocked_by_stat_type=dict(sorted(blocked_by_stat_type.items())),
+        blocked_reasons=dict(sorted(blocked_reasons.items())),
         latest_persisted_at=latest_persisted_at,
         latest_audit_source_prop_captured_at=latest_audit_source_prop_captured_at,
         audit_lag_minutes=(
@@ -1350,6 +1619,7 @@ def build_signal_run_health(db: Session, today_game_ids: list[str]) -> SignalRun
             else None
         ),
         signals_missing_source_game=0,
+        **audit_summary,
     )
 
 

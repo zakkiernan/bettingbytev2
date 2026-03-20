@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 
 from api.routes import (
+    audit_router,
     auth_router,
     edges_router,
     games_router,
@@ -15,6 +16,7 @@ from api.routes import (
 app = FastAPI(title="BettingByte API", version="0.1.0")
 
 app.include_router(auth_router, prefix="/api")
+app.include_router(audit_router, prefix="/api")
 app.include_router(games_router, prefix="/api")
 app.include_router(props_router, prefix="/api")
 app.include_router(edges_router, prefix="/api")

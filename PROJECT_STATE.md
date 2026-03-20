@@ -1,247 +1,202 @@
 # Project State
 
-Last updated: 2026-03-12
+Last updated: 2026-03-18
 Project root: `E:\dev\projects\bettingbyte-v2`
 
 ## Product Goal
-Sellable NBA betting analytics product with:
-- pregame signals
-- stronger live betting analytics later
 
-Current priority is backend only:
-- ingestion reliability
-- database structure
-- analytics foundation
-- pregame points model before any live model work
+Backend-first NBA prop analytics platform with:
+- reliable pregame signal generation first
+- live modeling only after pregame readiness, auditability, and calibration are trustworthy
+
+Frontend remains frozen.
 
 ## Current Backend Status
+
 ### Ingestion / Database
-- Alembic is in place and managing schema.
-- Historical game-log ingestion is complete.
-- Historical advanced/tracking enrichment is complete.
-- Canonical historical game coverage is complete.
-- Live and pregame market/state ingestion are working.
-- FanDuel remains the current test sportsbook adapter.
-- Rotation sync queue/state exists for durable backfill tracking.
-- Postgame enrichment enqueues rotation work instead of fetching it inline.
-- Runtime rotation ingestion now uses scraper-backed pages from `nbarotations.info` via `ingestion/rotation_provider.py`.
-- The old NBA `GameRotation` runtime path has been removed from `ingestion/nba_client.py`.
-- Rotation health reports pending/retry/quarantine counts and recent failure categories.
-- Official NBA injury-report PDF ingestion is now live via `ingestion/injury_reports.py`.
-- Historical official injury snapshots are stored in normalized DB tables and available to analytics.
-- Pregame context prototype data is available through the isolated feature-pack bridge and can feed opportunity features.
+
+- Historical game logs, advanced logs, and rotation data are live.
+- Official NBA injury-report ingestion/backfill is live.
+- Injury-report player matching now uses one canonical normalizer in `analytics/name_matching.py`.
+- Local injury-entry backfill resolved all named `player_id = NULL` rows.
+- FanDuel pregame and live odds ingestion is live.
+- `odds_snapshots` now captures:
+  - phased pregame writes (`early`, `late`, `tip`)
+  - rolling pregame accumulation (`accumulation`)
+  - live snapshots (`live`)
+- New append-only signal audit table exists:
+  - `signal_audit_trail`
+- Health reporting now covers:
+  - line archive density
+  - injury-entry match coverage
+  - readiness counts by stat type
+  - blocker reason counts
+  - audit coverage summary
 
 ### Analytics
-- Pregame analytics architecture is split into:
-  - shared opportunity layer
-  - separate points engine
-  - evaluation and diagnostics layers
-- Current shared opportunity modules:
-  - `analytics/features_opportunity.py`
-  - `analytics/opportunity_model.py`
-- Current points modules:
-  - `analytics/features_pregame.py`
-  - `analytics/pregame_model.py`
-- Evaluation/diagnostics:
-  - `analytics/evaluation.py`
-  - `analytics/diagnostics.py`
+
+- Shared opportunity backbone is the standard runtime path.
+- Separate stat engines are live for:
+  - points
+  - rebounds
+  - assists
+  - threes
+- Absence-impact plumbing remains intact but default coefficients are zeroed.
+- Evaluation/reporting now includes:
+  - error summaries
+  - decision summaries
+  - absence-impact summaries
+  - calibration curves
+  - threshold analysis
 
 ## Current Modeling State
-### Pregame Points Baseline
-- Transparent baseline model exists and runs.
-- Points now consume the shared opportunity backbone.
-- Historical pregame line coverage is still too thin for serious edge conclusions.
 
-Most recent broad points backtest after wiring opportunity into the points engine:
-- Sample size: `14,547`
-- MAE: `5.0822`
-- RMSE: `6.5295`
-- Bias: `0.4156`
-- Within 2 points: about `25.7%`
-- Within 4 points: about `48.7%`
+### Pregame Baselines
 
-Interpretation:
-- architecture is cleaner
-- points got a small projection improvement
-- the next real gains still depend on better opportunity/context quality
+Window: `2026-01-01` through `2026-03-12`
 
-### Opportunity Model Snapshot
-Most recent injury-aware opportunity backtest on `2026-01-01` through `2026-03-12`:
-- Sample size: `9,064`
-- Minutes MAE: `4.9556`
-- Minutes RMSE: `6.4431`
-- Minutes bias: `0.1252`
-- Usage MAE: `0.0486`
-- Start accuracy: `0.8890`
-- Close accuracy: `0.5690`
-- Official injury player match pct: `0.0190`
-- Official injury team-context pct: `0.3641`
+| Stat type | Sample | MAE | RMSE | Bias |
+|---|---:|---:|---:|---:|
+| Points | 9,147 | 4.6386 | 5.8930 | 0.6946 |
+| Rebounds | 9,147 | 1.8497 | 2.4091 | -0.0148 |
+| Assists | 9,147 | 1.3510 | 1.7811 | 0.1559 |
+| Threes | 9,147 | 0.9084 | 1.2157 | 0.1428 |
 
 Interpretation:
-- injury-aware backtest path is now correctly wired
-- official injury data is measurable and no longer meaningfully harmful after the semantic fix
-- but it is not yet a strong positive signal because historical player-level attachment is still sparse and coarse
+- points and rebounds both improved materially this session
+- rebounds bias has been effectively neutralized
+- assists remains the cleanest untouched engine
+- threes still needs archive accumulation before any edge claims are meaningful
 
-### Miss Profile Summary
-Largest opportunity miss buckets in the current top-error sample are roughly:
-- minutes spikes
-- minutes shortfall
-- availability / DNP
+### Recommendation Read
 
-Main conclusion:
-- role/opportunity modeling still matters more than more point-formula tweaking
-- direct player availability and real vacated-role context matter more than generic team injury counts
+- Points recommendations are now more conservative after calibration review.
+- Rebounds recommendations are also tighter after calibration review.
+- Assists thresholds are unchanged for now.
+- Threes thresholds are unchanged because historical line coverage is still zero.
+
+### Opportunity / Context
+
+- Opportunity remains the shared dependency for every stat engine.
+- Readiness now blocks any signal with `opportunity_confidence < 0.35`.
+- Missing stat-specific feature coverage and thin non-zero sample are now first-class blockers.
+- Official injury archive coverage is now:
+  - overall entry match rate: `93.21%`
+  - named entry match rate: `100.00%`
+
+### Absence-Impact
+
+- Default absence-impact coefficients remain zero.
+- Signed-delta plumbing is fixed.
+- Source-pool overrides expanded again:
+  - total overrides in DB: `30`
+- Current starter-pool rebuild:
+  - `149` selected sources
+  - `1,426` summaries persisted in the rebuild batch
 
 ## Current Phase Progress
+
 ### Phase 1: Analytics Architecture
 Status: complete
 
 Completed:
-- split shared opportunity features from points-specific features
-- added standalone opportunity model
-- kept points engine separate
-- preserved tests and runtime entrypoints
+- shared opportunity backbone
+- separate stat engines
+- transparent breakdowns
+- backtest/reporting structure
 
 ### Phase 2: Rotation Data Layer
 Status: complete
 
-Completed:
-- added rotation ORM tables:
-  - `team_rotation_games`
-  - `player_rotation_games`
-  - `player_rotation_stints`
-- added Alembic migration:
-  - `alembic/versions/7d5583207ad0_add_rotation_data_layer.py`
-- added writer persistence for rotation tables
-- added rotation backlog / health reporting
-- added `backfill_historical_rotations()` job
-- added `rotation_sync_states` queue table and Alembic migration:
-  - `alembic/versions/1f5d5a1f4c4e_add_rotation_sync_states.py`
-- added queue bootstrap / selection / retry tracking in:
-  - `ingestion/rotation_sync.py`
-- changed postgame enrichment to enqueue rotation sync instead of fetching inline
-- added separate queue worker:
-  - `process_rotation_sync_queue()`
-- added scheduler hook for queue processing in:
-  - `ingestion/scheduler.py`
-
 ### Phase 3: Rotation Backfill And Hardening
 Status: complete
 
-Completed:
-- replaced runtime `GameRotation` dependency with scraper-backed ingestion from `nbarotations.info`
-- added source-specific rotation provider in `ingestion/rotation_provider.py`
-- removed old runtime `GameRotation` bundle/fetch logic from `ingestion/nba_client.py`
-- preserved queue/backoff/quarantine state machinery
-- tightened queue success to require complete normalized rotation coverage for the game
-- fixed false failures caused by:
-  - low-minute box-score players absent from the scraper page
-  - extra fringe scraper players
-  - zero-window scraper players
-- fixed targeted retry runs so specific game IDs do not get reselected repeatedly across batches
-- backfilled all reachable 2025-26 rotation pages
-- explicitly classified missing scraper pages as `source_missing_game`
-- immediately quarantine source-missing games instead of wasting retries
-
-Operational read:
-- the local rotation pipeline is stable
-- the dominant remaining misses are source gaps, not parser or DB bugs
-- `nbarotations.info` is now a workable primary source for this phase
-- rotation data is ready to inform the next modeling step
-
-Current health snapshot:
-- `teams`: `30`
-- `players`: `5123`
-- `games`: `974`
-- `historical_game_logs`: `20721`
-- `historical_advanced_logs`: `24909`
-- `enriched_games`: `955`
-- `enrichment_coverage_pct`: `100.0`
-- `team_rotation_games`: `1896`
-- `player_rotation_games`: `20538`
-- `player_rotation_stints`: `64461`
-- `rotation_games`: `948`
-- `rotation_coverage_pct`: `99.27`
-- `rotation_queue_pending`: `0`
-- `rotation_queue_retry`: `0`
-- `rotation_queue_quarantined`: `7`
-- `rotation_recent_failure_counts`:
-  - `source_missing_game`: `7`
-
-Known source-missing games:
-- `0022500314` - CHI at ORL on 2025-12-01
-- `0022500523` - LAL at SAS on 2026-01-07
-- `0022500576` - NYK at SAC on 2026-01-14
-- `0022500581` - OKC at HOU on 2026-01-15
-- `0022500595` - IND at DET on 2026-01-17
-- `0022500620` - CLE at CHA on 2026-01-21
-- `0022500753` - GSW at LAL on 2026-02-07
-
-## Current Next Phase Gate
 ### Phase 4: Opportunity Model Improvement
 Status: in progress
 
-Completed inside Phase 4 so far:
-- added rotation-derived opportunity features and calibration
-- wired opportunity outputs into the points model
-- added isolated pregame context bridge for projected starters / availability context
-- added official NBA injury PDF ingestion and historical backfill
-- wired official injury context into runtime and historical opportunity evaluation
-- fixed the initial injury-feature semantics so official team summaries no longer masquerade as player-specific `top7/top9` teammate-out signals
+Completed inside Phase 4:
+- official injury report wiring
+- historical pregame context backfill
+- empirical absence-impact layer
+- signed-delta absence-impact fix
+- source override expansion
 
-Current next work:
-- improve player-level pregame availability matching and coverage
-- make injury features stronger only when they are player-specific or role-specific
-- keep official team summaries as weak context / diagnostics unless better mapping exists
-- revisit denser near-tip historical injury snapshots if we need stronger backtest fidelity
+Open inside Phase 4:
+- improve pair quality before re-enabling absence-impact bonuses
+- improve how matched official injury rows affect player-level opportunity context
+
+### Phase 5: Pregame Reliability Hardening
+Status: in progress
+
+#### Phase 1 readiness gates
+Status: complete
+
+Completed:
+- blocked / limited / ready status surfaced end-to-end
+- stat-specific readiness checks
+- opportunity-confidence blocker
+- stale archive warning
+- health blocker counts by reason / stat type
+
+#### Phase 2 signal audit trail
+Status: complete
+
+Completed:
+- append-only `signal_audit_trail`
+- audit endpoints
+- audit summary in health
+
+#### Phase 3 calibration
+Status: started
+
+Completed:
+- calibration curve utilities
+- threshold analysis utilities
+- calibration output added to report builders
+- provisional threshold tightening for points and rebounds
+
+Still needed:
+- collect more line coverage before treating calibration as stable
+- revisit assists / threes thresholds once archive density improves
+
+## Current Next Phase Gate
+
+Before live modeling starts:
+
+1. Let the hardened odds archive accumulate enough multi-snapshot coverage to support real edge validation.
+2. Improve how matched official injury rows change player-level opportunity context; raw named-entry matching is no longer the main bottleneck.
+3. Revisit absence-impact with pair-level suppression / stricter pair sampling.
+4. Re-run calibration once line coverage is materially denser.
+
+Live modeling should remain blocked until those pregame reliability gates are stronger.
 
 ## Important Design Decisions
+
 - Shared opportunity backbone, separate stat engines.
-- Do not begin live modeling yet.
-- Do not expand to rebounds/assists/threes until points pregame structure is trusted.
-- Do not assume betting edge quality until we have larger historical line archives.
-- Every model change should be isolated and re-backtested.
-- Treat sportsbook IDs as adapter IDs, not canonical IDs.
-- Keep the scraper source isolated behind a provider layer rather than spreading source-specific logic through jobs/writers.
-- Treat official team-level injury counts as weak context, not direct player-opportunity movers.
-- Reserve strong minutes/usage shifts for player-specific availability and true vacated-role signals.
+- Backend/model quality over frontend work.
+- Conservative readiness and recommendation thresholds are preferred.
+- Audit trail is append-only.
+- Do not trust betting-edge conclusions until line archive coverage is materially larger.
+- Do not start live model implementation yet.
 
 ## Useful Commands
+
 ### Tests
 ```powershell
-E:\dev\projects\bettingbyte-v2\.venv\Scripts\python.exe -m unittest E:\dev\projects\bettingbyte-v2\tests\test_pregame_model.py E:\dev\projects\bettingbyte-v2\tests\test_opportunity_model.py E:\dev\projects\bettingbyte-v2\tests\test_rotation_hardening.py -v
+E:\dev\projects\bettingbyte-v2\.venv\Scripts\python.exe -m unittest discover -s E:\dev\projects\bettingbyte-v2\tests -p "test_*.py" -v
 ```
 
 ### Compile checks
 ```powershell
-E:\dev\projects\bettingbyte-v2\.venv\Scripts\python.exe -m compileall E:\dev\projects\bettingbyte-v2\database E:\dev\projects\bettingbyte-v2\ingestion E:\dev\projects\bettingbyte-v2\analytics E:\dev\projects\bettingbyte-v2\tests
+E:\dev\projects\bettingbyte-v2\.venv\Scripts\python.exe -m compileall E:\dev\projects\bettingbyte-v2\database E:\dev\projects\bettingbyte-v2\ingestion E:\dev\projects\bettingbyte-v2\analytics E:\dev\projects\bettingbyte-v2\tests E:\dev\projects\bettingbyte-v2\api
+```
+
+### Pytest coverage for ingestion / health
+```powershell
+E:\dev\projects\bettingbyte-v2\.venv\Scripts\python.exe -m pytest E:\dev\projects\bettingbyte-v2\tests\test_jobs.py E:\dev\projects\bettingbyte-v2\tests\test_scheduler.py E:\dev\projects\bettingbyte-v2\tests\test_health_service.py -q
 ```
 
 ### Migrations
 ```powershell
 E:\dev\projects\bettingbyte-v2\.venv\Scripts\alembic.exe upgrade head
-```
-
-### Rotation queue batch
-```powershell
-from ingestion.jobs import backfill_historical_rotations
-print(backfill_historical_rotations(season='2025-26', batch_size=10, max_batches=1))
-```
-
-### Direct queue worker
-```powershell
-from ingestion.jobs import process_rotation_sync_queue
-print(process_rotation_sync_queue(season='2025-26', batch_size=10, max_batches=1))
-```
-
-### Health report
-```powershell
-from ingestion.validation import summarize_ingestion_health
-print(summarize_ingestion_health())
-```
-
-### Queue diagnostics
-```powershell
-from ingestion.validation import get_rotation_queue_diagnostics
-print(get_rotation_queue_diagnostics(season='2025-26'))
 ```

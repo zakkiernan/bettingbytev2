@@ -1,21 +1,35 @@
-import { PageTemplate } from "@/components/placeholders/page-template";
+import { Suspense } from "react";
+import { Skeleton } from "@/components/ui/skeleton";
+import BoardSection from "./_components/BoardSection";
+
+export const dynamic = "force-dynamic";
+
+function BoardSkeleton() {
+  return (
+    <div className="space-y-4">
+      <Skeleton className="ml-auto h-4 w-48" />
+      <Skeleton className="h-[400px]" />
+    </div>
+  );
+}
 
 export default function PropsPage() {
   return (
-    <PageTemplate
-      eyebrow="/props"
-      title="Prop board shell"
-      description="This placeholder is built around the scannable table-first experience from the spec, with room for filters, tier gating, inline expansion, and fast refresh indicators."
-      apiContracts={[
-        "GET /api/props/board?date=today&stat_type=points",
-        "GET /api/edges/today",
-        "GET /api/players/:playerId/props",
-      ]}
-      highlights={[
-        "Route scaffolding already includes a deep-dive path so table rows can expand or link without changing page structure later.",
-        "The shell is dark-first and mono-heavy to match the terminal-like data identity from the frontend spec.",
-        "Filter controls can drop into the hero band while the results grid stays stable across desktop and mobile.",
-      ]}
-    />
+    <div className="space-y-6">
+      {/* Page header */}
+      <div className="flex items-baseline justify-between">
+        <div>
+          <p className="text-xs uppercase tracking-[0.22em] text-[color:var(--color-text-muted)]">
+            Tonight's slate
+          </p>
+          <h1 className="text-2xl font-bold">Prop Board</h1>
+        </div>
+      </div>
+
+      {/* Board — streams in after data loads */}
+      <Suspense fallback={<BoardSkeleton />}>
+        <BoardSection />
+      </Suspense>
+    </div>
   );
 }

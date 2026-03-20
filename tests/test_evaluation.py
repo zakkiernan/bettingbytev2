@@ -13,6 +13,8 @@ from analytics.evaluation import (
     _summarize_context_attachment,
     _summarize_points_decisions,
     _summarize_points_errors,
+    analyze_recommendation_thresholds,
+    compute_calibration_curve,
     summarize_opportunity_absence_impact,
     summarize_points_absence_impact,
 )
@@ -328,6 +330,81 @@ class HistoricalOddsEvaluationTests(unittest.TestCase):
         self.assertEqual(summary['unaffected_minutes_mae'], 1.0)
         self.assertTrue(any(bucket.label == '0.65+' for bucket in summary['confidence_buckets']))
 
+    def test_summarize_absence_impact_treats_negative_bonus_as_active(self):
+        points_summary = summarize_points_absence_impact([
+            SimpleNamespace(
+                game_id='1',
+                game_date=datetime(2026, 1, 1),
+                player_name='A',
+                team_abbreviation='BOS',
+                opponent_abbreviation='NYK',
+                projected_points=22.0,
+                actual_points=20.0,
+                error=2.0,
+                abs_error=2.0,
+                absence_impact_sample_confidence=0.68,
+                absence_impact_source_count=2.0,
+                absence_impact_minutes_bonus=-1.2,
+                absence_impact_usage_bonus=0.0,
+            ),
+            SimpleNamespace(
+                game_id='2',
+                game_date=datetime(2026, 1, 2),
+                player_name='B',
+                team_abbreviation='BOS',
+                opponent_abbreviation='MIA',
+                projected_points=21.0,
+                actual_points=20.0,
+                error=1.0,
+                abs_error=1.0,
+                absence_impact_sample_confidence=None,
+                absence_impact_source_count=None,
+                absence_impact_minutes_bonus=0.0,
+                absence_impact_usage_bonus=0.0,
+            ),
+        ])
+        opportunity_summary = summarize_opportunity_absence_impact([
+            SimpleNamespace(
+                game_id='1',
+                game_date=datetime(2026, 1, 1),
+                player_name='A',
+                team_abbreviation='BOS',
+                opponent_abbreviation='NYK',
+                expected_minutes=28.0,
+                actual_minutes=26.0,
+                minutes_error=2.0,
+                abs_minutes_error=2.0,
+                context_source='official_injury_team',
+                absence_impact_sample_confidence=0.68,
+                absence_impact_source_count=2.0,
+                absence_impact_minutes_bonus=-1.2,
+                absence_impact_usage_bonus=0.0,
+            ),
+            SimpleNamespace(
+                game_id='2',
+                game_date=datetime(2026, 1, 2),
+                player_name='B',
+                team_abbreviation='BOS',
+                opponent_abbreviation='MIA',
+                expected_minutes=21.0,
+                actual_minutes=20.0,
+                minutes_error=1.0,
+                abs_minutes_error=1.0,
+                context_source='none',
+                absence_impact_sample_confidence=None,
+                absence_impact_source_count=None,
+                absence_impact_minutes_bonus=0.0,
+                absence_impact_usage_bonus=0.0,
+            ),
+        ])
+
+        self.assertEqual(points_summary['affected_count'], 1)
+        self.assertEqual(points_summary['minutes_affected_count'], 1)
+        self.assertEqual(points_summary['unaffected_mae'], 1.0)
+        self.assertEqual(opportunity_summary['affected_count'], 1)
+        self.assertEqual(opportunity_summary['minutes_affected_count'], 1)
+        self.assertEqual(opportunity_summary['unaffected_minutes_mae'], 1.0)
+
     def test_summarize_stats_signal_decisions_tracks_calibration_gap(self):
         rows = [
             StatsSignalBacktestRow(
@@ -533,6 +610,87 @@ class HistoricalOddsEvaluationTests(unittest.TestCase):
         self.assertEqual(by_label["24_to_32m"].recommendation_count, 1)
         self.assertEqual(by_label["32m_plus"].sample_size, 1)
         self.assertEqual(by_label["32m_plus"].recommendation_count, 0)
+
+    def test_compute_calibration_curve_groups_confidence_bins(self):
+        rows = [
+            SimpleNamespace(
+                confidence=0.21,
+                line_available=True,
+                line=20.0,
+                projected_points=24.0,
+                actual_points=22.0,
+                recommended_side='OVER',
+                recommended_outcome='win',
+            ),
+            SimpleNamespace(
+                confidence=0.24,
+                line_available=True,
+                line=20.0,
+                projected_points=19.0,
+                actual_points=23.0,
+                recommended_side='UNDER',
+                recommended_outcome='loss',
+            ),
+            SimpleNamespace(
+                confidence=0.81,
+                line_available=True,
+                line=18.0,
+                projected_points=21.0,
+                actual_points=20.0,
+                recommended_side='OVER',
+                recommended_outcome='win',
+            ),
+        ]
+
+        curve = compute_calibration_curve(rows, n_bins=5)
+        low_bin = next(item for item in curve if item['bin_label'] == '0.2-0.4')
+        high_bin = next(item for item in curve if item['bin_label'] == '0.8-1.0')
+
+        self.assertEqual(low_bin['sample_count'], 2)
+        self.assertEqual(low_bin['recommendation_count'], 2)
+        self.assertEqual(low_bin['recommendation_hit_rate'], 0.5)
+        self.assertEqual(high_bin['actual_hit_rate'], 1.0)
+
+    def test_analyze_recommendation_thresholds_summarizes_qualified_rows(self):
+        rows = [
+            SimpleNamespace(
+                confidence=0.72,
+                line_available=True,
+                line=20.0,
+                projected_points=22.0,
+                actual_points=23.0,
+            ),
+            SimpleNamespace(
+                confidence=0.72,
+                line_available=True,
+                line=18.0,
+                projected_points=16.0,
+                actual_points=19.0,
+            ),
+            SimpleNamespace(
+                confidence=0.48,
+                line_available=True,
+                line=12.0,
+                projected_points=15.0,
+                actual_points=14.0,
+            ),
+        ]
+
+        analysis = analyze_recommendation_thresholds(
+            rows,
+            edge_thresholds=[1.5, 2.5],
+            confidence_thresholds=[0.50, 0.70],
+        )
+        selected = next(
+            item
+            for item in analysis
+            if item['edge_threshold'] == 1.5 and item['confidence_threshold'] == 0.7
+        )
+
+        self.assertEqual(selected['qualified_count'], 2)
+        self.assertEqual(selected['graded_count'], 2)
+        self.assertEqual(selected['hit_rate'], 0.5)
+        self.assertEqual(selected['average_edge'], 2.0)
 
 
 if __name__ == '__main__':
