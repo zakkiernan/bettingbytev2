@@ -224,6 +224,39 @@ def _payload(source: str, payload_type: str, payload: Any, external_id: str | No
     }
 
 
+def _failure_payload(
+    source: str,
+    payload_type: str,
+    *,
+    endpoint: str,
+    error: Exception,
+    identifier: str | None = None,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    error_payload = {
+        "status": "error",
+        "endpoint": endpoint,
+        "identifier": identifier,
+        "error_type": error.__class__.__name__,
+        "error_message": _format_exception_message(error),
+    }
+    error_context = dict(context or {})
+    error_context.update({
+        "status": "error",
+        "endpoint": endpoint,
+        "identifier": identifier,
+        "error_type": error.__class__.__name__,
+        "error_message": _format_exception_message(error),
+    })
+    return _payload(
+        source,
+        payload_type,
+        error_payload,
+        external_id=identifier,
+        context=error_context,
+    )
+
+
 @lru_cache(maxsize=1)
 def _team_lookup() -> dict[str, dict[str, str]]:
     return {
@@ -382,16 +415,16 @@ def get_todays_games_bundle(game_date: date | None = None) -> tuple[list[dict[st
         _sleep_for_rate_limit()
         games = _normalize_scoreboard_games(data["scoreboard"]["games"])
         return games, [_payload("nba", "scoreboard_schedule", data, context={"game_date": game_date.isoformat()})]
-    except JSONDecodeError:
+    except JSONDecodeError as exc:
         # The schedule endpoint occasionally returns empty/non-JSON bodies for future dates.
         if game_date > date.today():
             logger.warning("NBA scoreboard returned malformed schedule data for %s; treating as no future games.", game_date)
             return [], []
         logger.exception("Failed to fetch NBA scoreboard for %s", game_date)
-        return [], []
-    except Exception:
+        return [], [_failure_payload("nba", "scoreboard_schedule", endpoint="scoreboard_schedule", error=exc, identifier=game_date.isoformat(), context={"game_date": game_date.isoformat()})]
+    except Exception as exc:
         logger.exception("Failed to fetch NBA scoreboard for %s", game_date)
-        return [], []
+        return [], [_failure_payload("nba", "scoreboard_schedule", endpoint="scoreboard_schedule", error=exc, identifier=game_date.isoformat(), context={"game_date": game_date.isoformat()})]
 
 
 def get_todays_games(game_date: date | None = None) -> list[dict[str, Any]]:
@@ -430,9 +463,9 @@ def get_live_scoreboard_bundle() -> tuple[list[dict[str, Any]], list[dict[str, A
 
         payload = _payload("nba", "live_scoreboard", data)
         return games, [payload]
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to fetch live NBA scoreboard")
-        return [], []
+        return [], [_failure_payload("nba", "live_scoreboard", endpoint="live_scoreboard", error=exc)]
 
 
 def get_live_scoreboard() -> list[dict[str, Any]]:
@@ -484,9 +517,9 @@ def get_live_boxscore_bundle(game_id: str) -> tuple[list[dict[str, Any]], list[d
 
         payload = _payload("nba", "live_boxscore", data, external_id=game_id)
         return players_data, [payload]
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to fetch live boxscore for game %s", game_id)
-        return [], []
+        return [], [_failure_payload("nba", "live_boxscore", endpoint="live_boxscore", error=exc, identifier=game_id)]
 
 
 def get_live_boxscore(game_id: str) -> list[dict[str, Any]]:
@@ -558,9 +591,21 @@ def get_historical_player_game_logs_bundle(
             },
         )
         return normalized_rows, [payload]
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to fetch historical NBA game logs for season %s", season)
-        return [], []
+        return [], [_failure_payload(
+            "nba",
+            "historical_player_game_logs",
+            endpoint="historical_player_game_logs",
+            error=exc,
+            identifier=season,
+            context={
+                "season": season,
+                "season_type": season_type_all_star,
+                "date_from": date_from_nullable,
+                "date_to": date_to_nullable,
+            },
+        )]
 
 
 def get_historical_player_game_logs(
@@ -628,9 +673,9 @@ def get_boxscore_summary_bundle(game_id: str) -> tuple[dict[str, Any] | None, li
         data = endpoint.get_dict()
         _sleep_for_rate_limit()
         return data, [_payload("nba", "boxscore_summary", data, external_id=game_id)]
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to fetch boxscore summary for game %s", game_id)
-        return None, []
+        return None, [_failure_payload("nba", "boxscore_summary", endpoint="boxscore_summary", error=exc, identifier=game_id)]
 
 
 def get_boxscore_summary(game_id: str) -> dict[str, Any] | None:
@@ -702,9 +747,9 @@ def get_advanced_boxscore_bundle(game_id: str) -> tuple[list[dict[str, Any]], li
                     }
                 )
         return players_data, [_payload("nba", "advanced_boxscore", data, external_id=game_id)]
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to fetch advanced boxscore for game %s", game_id)
-        return [], []
+        return [], [_failure_payload("nba", "advanced_boxscore", endpoint="advanced_boxscore", error=exc, identifier=game_id)]
 
 
 def get_advanced_boxscore(game_id: str) -> list[dict[str, Any]]:
@@ -750,9 +795,9 @@ def get_player_tracking_bundle(game_id: str) -> tuple[list[dict[str, Any]], list
                     }
                 )
         return players_data, [_payload("nba", "player_tracking", data, external_id=game_id)]
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to fetch player tracking for game %s", game_id)
-        return [], []
+        return [], [_failure_payload("nba", "player_tracking", endpoint="player_tracking", error=exc, identifier=game_id)]
 
 
 def get_player_tracking(game_id: str) -> list[dict[str, Any]]:
@@ -906,9 +951,16 @@ def get_team_defensive_stats_bundle(
             _payload("nba", "team_defense_pt", pt_raw, context={"season": season, "season_type": season_type_all_star}),
         ]
         return list(defensive_data.values()), payloads
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to fetch team defensive stats for season %s", season)
-        return [], []
+        return [], [_failure_payload(
+            "nba",
+            "team_defense",
+            endpoint="team_defense",
+            error=exc,
+            identifier=season,
+            context={"season": season, "season_type": season_type_all_star},
+        )]
 
 
 def get_team_defensive_stats(
@@ -969,9 +1021,9 @@ def get_shot_chart_bundle(game_id: str) -> tuple[list[dict[str, Any]], list[dict
 
         payload = _payload("nba", "shot_chart_detail", data, external_id=game_id)
         return normalized_rows, [payload]
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to fetch shot chart detail for game %s", game_id)
-        return [], []
+        return [], [_failure_payload("nba", "shot_chart_detail", endpoint="shot_chart_detail", error=exc, identifier=game_id)]
 
 
 def get_hustle_boxscore_bundle(game_id: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -1017,9 +1069,9 @@ def get_hustle_boxscore_bundle(game_id: str) -> tuple[list[dict[str, Any]], list
 
         payload = _payload("nba", "hustle_boxscore", data, external_id=game_id)
         return normalized_rows, [payload]
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to fetch hustle boxscore for game %s", game_id)
-        return [], []
+        return [], [_failure_payload("nba", "hustle_boxscore", endpoint="hustle_boxscore", error=exc, identifier=game_id)]
 
 
 def get_matchup_boxscore_bundle(game_id: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -1063,9 +1115,9 @@ def get_matchup_boxscore_bundle(game_id: str) -> tuple[list[dict[str, Any]], lis
 
         payload = _payload("nba", "matchup_boxscore", data, external_id=game_id)
         return normalized_rows, [payload]
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to fetch matchup boxscore for game %s", game_id)
-        return [], []
+        return [], [_failure_payload("nba", "matchup_boxscore", endpoint="matchup_boxscore", error=exc, identifier=game_id)]
 
 
 def get_win_probability_bundle(game_id: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -1105,9 +1157,9 @@ def get_win_probability_bundle(game_id: str) -> tuple[list[dict[str, Any]], list
 
         payload = _payload("nba", "win_probability_pbp", data, external_id=game_id)
         return normalized_rows, [payload]
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to fetch win probability for game %s", game_id)
-        return [], []
+        return [], [_failure_payload("nba", "win_probability_pbp", endpoint="win_probability_pbp", error=exc, identifier=game_id)]
 
 
 def get_player_clutch_stats_bundle(
@@ -1182,9 +1234,16 @@ def get_player_clutch_stats_bundle(
             context={"season": season, "season_type": season_type_all_star, "clutch_time": clutch_time, "point_diff": point_diff},
         )
         return normalized_rows, [payload]
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to fetch player clutch stats for season %s", season)
-        return [], []
+        return [], [_failure_payload(
+            "nba",
+            "player_clutch_stats",
+            endpoint="player_clutch_stats",
+            error=exc,
+            identifier=season,
+            context={"season": season, "season_type": season_type_all_star, "clutch_time": clutch_time, "point_diff": point_diff},
+        )]
 
 
 def get_player_hustle_stats_bundle(
@@ -1239,9 +1298,16 @@ def get_player_hustle_stats_bundle(
 
         payload = _payload("nba", "player_hustle_stats", data, context={"season": season, "season_type": season_type_all_star})
         return normalized_rows, [payload]
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to fetch player hustle stats for season %s", season)
-        return [], []
+        return [], [_failure_payload(
+            "nba",
+            "player_hustle_stats",
+            endpoint="player_hustle_stats",
+            error=exc,
+            identifier=season,
+            context={"season": season, "season_type": season_type_all_star},
+        )]
 
 
 def get_player_play_types_bundle(
@@ -1300,9 +1366,16 @@ def get_player_play_types_bundle(
         # An empty PlayType parameter returns all play types in the current nba_api response.
         payload = _payload("nba", "player_play_types", data, context={"season": season, "season_type": season_type_all_star})
         return normalized_rows, [payload]
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to fetch player play types for season %s", season)
-        return [], []
+        return [], [_failure_payload(
+            "nba",
+            "player_play_types",
+            endpoint="player_play_types",
+            error=exc,
+            identifier=season,
+            context={"season": season, "season_type": season_type_all_star},
+        )]
 
 
 def get_player_tracking_stats_bundle(
@@ -1401,9 +1474,16 @@ def get_player_tracking_stats_bundle(
             )
 
         return normalized_rows, payloads
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to fetch player tracking season stats for season %s", season)
-        return [], []
+        return [], [_failure_payload(
+            "nba",
+            "player_tracking_stats",
+            endpoint="player_tracking_stats",
+            error=exc,
+            identifier=season,
+            context={"season": season, "season_type": season_type_all_star},
+        )]
 
 
 def get_player_on_off_stats_bundle(
@@ -1477,9 +1557,16 @@ def get_player_on_off_stats_bundle(
             )
 
         return normalized_rows, payloads
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to fetch player on/off stats for season %s", season)
-        return [], []
+        return [], [_failure_payload(
+            "nba",
+            "player_on_off_stats",
+            endpoint="player_on_off_stats",
+            error=exc,
+            identifier=season,
+            context={"season": season, "season_type": season_type_all_star},
+        )]
 
 
 def get_player_defensive_tracking_bundle(
@@ -1539,9 +1626,16 @@ def get_player_defensive_tracking_bundle(
             )
 
         return normalized_rows, payloads
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to fetch player defensive tracking for season %s", season)
-        return [], []
+        return [], [_failure_payload(
+            "nba",
+            "player_defensive_tracking",
+            endpoint="player_defensive_tracking",
+            error=exc,
+            identifier=season,
+            context={"season": season, "season_type": season_type_all_star},
+        )]
 
 
 def get_player_shot_locations_bundle(
@@ -1595,9 +1689,16 @@ def get_player_shot_locations_bundle(
 
         payload = _payload("nba", "player_shot_locations", data, context={"season": season, "season_type": season_type_all_star})
         return normalized_rows, [payload]
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to fetch player shot locations for season %s", season)
-        return [], []
+        return [], [_failure_payload(
+            "nba",
+            "player_shot_locations",
+            endpoint="player_shot_locations",
+            error=exc,
+            identifier=season,
+            context={"season": season, "season_type": season_type_all_star},
+        )]
 
 
 def get_lineup_stats_bundle(
@@ -1656,6 +1757,13 @@ def get_lineup_stats_bundle(
 
         payload = _payload("nba", "lineup_stats", data, context={"season": season, "season_type": season_type_all_star})
         return normalized_rows, [payload]
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to fetch lineup stats for season %s", season)
-        return [], []
+        return [], [_failure_payload(
+            "nba",
+            "lineup_stats",
+            endpoint="lineup_stats",
+            error=exc,
+            identifier=season,
+            context={"season": season, "season_type": season_type_all_star},
+        )]

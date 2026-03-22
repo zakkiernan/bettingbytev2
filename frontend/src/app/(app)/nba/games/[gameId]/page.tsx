@@ -6,6 +6,7 @@ import { Card } from "@/components/ui/card";
 import { fetchGameDetail } from "@/lib/api";
 import { GameContextSection } from "./_components/GameContextSection";
 import { GamePropsSection } from "./_components/GamePropsSection";
+import { GameStatsSection } from "./_components/GameStatsSection";
 
 export const dynamic = "force-dynamic";
 
@@ -91,6 +92,17 @@ export default async function GameDetailPage({ params }: PageProps) {
         </div>
       }>
         <GamePropsSection gameId={gameId} />
+      </Suspense>
+
+      {/* Win prob, shot chart, matchups, hustle - for completed games */}
+      <Suspense fallback={
+        <div className="space-y-6">
+          <Skeleton className="h-72" />
+          <Skeleton className="h-64" />
+          <Skeleton className="h-48" />
+        </div>
+      }>
+        <GameStatsSection gameId={gameId} />
       </Suspense>
     </div>
   );

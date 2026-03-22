@@ -8,6 +8,7 @@ import requests
 
 from ingestion.jobs import (
     _backfill_injury_entry_player_ids_impl,
+    _sync_live_state_and_markets_impl,
     _sync_odds_accumulation_impl,
     _sync_pregame_markets_impl,
     _sync_prop_snapshot_phase_impl,
@@ -205,3 +206,59 @@ def test_backfill_injury_entry_player_ids_job_delegates_to_ingestion_impl() -> N
 
     backfill_mock.assert_called_once_with()
     assert result["resolved"] == 8
+
+
+def test_sync_live_state_records_upstream_scoreboard_failures() -> None:
+    board = {
+        "props": [],
+        "event_mappings": [],
+        "payloads": [],
+    }
+    failure_payload = {
+        "source": "nba",
+        "payload_type": "live_scoreboard",
+        "external_id": None,
+        "context": {
+            "status": "error",
+            "endpoint": "live_scoreboard",
+            "identifier": None,
+            "error_type": "RuntimeError",
+            "error_message": "RuntimeError: boom",
+        },
+        "payload": {
+            "status": "error",
+            "endpoint": "live_scoreboard",
+            "identifier": None,
+            "error_type": "RuntimeError",
+            "error_message": "RuntimeError: boom",
+        },
+    }
+
+    with patch("ingestion.jobs._sync_reference_entities_impl"), patch(
+        "ingestion.jobs.fetch_current_prop_board", return_value=board
+    ), patch(
+        "ingestion.jobs.write_source_payloads"
+    ), patch(
+        "ingestion.jobs.write_players"
+    ), patch(
+        "ingestion.jobs.write_sportsbook_event_mappings"
+    ), patch(
+        "ingestion.jobs.write_prop_snapshot"
+    ), patch(
+        "ingestion.jobs.write_odds_snapshot"
+    ), patch(
+        "ingestion.jobs.get_live_scoreboard_bundle", return_value=([], [failure_payload])
+    ), patch(
+        "ingestion.jobs.write_games"
+    ), patch(
+        "ingestion.jobs.write_live_game_snapshots"
+    ), patch(
+        "ingestion.jobs.write_live_player_snapshots"
+    ), patch(
+        "ingestion.jobs.create_ingestion_run_item"
+    ) as run_item_mock:
+        result = _sync_live_state_and_markets_impl(run_id=17)
+
+    assert result["live_scoreboard_failures"] == 1
+    assert run_item_mock.call_args.kwargs["stage"] == "live_scoreboard"
+    assert run_item_mock.call_args.kwargs["status"] == "failed"

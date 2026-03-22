@@ -8,6 +8,8 @@ import { RotationTrendsSection } from "./_components/RotationTrendsSection";
 import { AbsenceSection } from "./_components/AbsenceSection";
 import { TrendSection } from "./_components/TrendSection";
 import { GameLogSection } from "./_components/GameLogSection";
+import { ShotChartSection } from "./_components/ShotChartSection";
+import { AdvancedStatsSection } from "./_components/AdvancedStatsSection";
 
 export const dynamic = "force-dynamic";
 
@@ -42,6 +44,14 @@ export default async function PlayerPage({ params }: PageProps) {
 
       <Suspense fallback={<Card className="space-y-3"><Skeleton className="h-5 w-32" />{Array.from({length:6}).map((_,i)=><Skeleton key={i} className="h-10" />)}</Card>}>
         <GameLogSection playerId={playerId} />
+      </Suspense>
+
+      <Suspense fallback={<div className="grid gap-6 lg:grid-cols-[1.4fr_0.8fr]"><Skeleton className="h-80" /><Skeleton className="h-80" /></div>}>
+        <ShotChartSection playerId={playerId} />
+      </Suspense>
+
+      <Suspense fallback={<div className="space-y-6"><Skeleton className="h-64" /><Skeleton className="h-48" /><div className="grid gap-6 lg:grid-cols-2"><Skeleton className="h-48" /><Skeleton className="h-48" /></div></div>}>
+        <AdvancedStatsSection playerId={playerId} />
       </Suspense>
     </div>
   );

@@ -1,9 +1,13 @@
+import { Suspense } from "react";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 
-import { fetchLiveGame } from "@/lib/api";
+import { fetchLiveGame, fetchGameWinProbability, fetchGameShotChart } from "@/lib/nba-api";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
+import { WinProbChart } from "@/components/charts/WinProbChart";
+import { ShotChart } from "@/components/charts/ShotChart";
 
 export const dynamic = "force-dynamic";
 
@@ -13,7 +17,11 @@ interface PageProps {
 
 export default async function LiveGamePage({ params }: PageProps) {
   const { gameId } = await params;
-  const game = await fetchLiveGame(gameId).catch(() => null);
+  const [game, winProb, shotChart] = await Promise.all([
+    fetchLiveGame(gameId).catch(() => null),
+    fetchGameWinProbability(gameId).catch(() => null),
+    fetchGameShotChart(gameId).catch(() => null),
+  ]);
 
   if (!game) {
     return <div className="py-20 text-center text-[color:var(--color-text-secondary)]">Live game not found.</div>;
@@ -107,6 +115,27 @@ export default async function LiveGamePage({ params }: PageProps) {
           </Card>
         </div>
       </div>
+
+      {/* Live win probability */}
+      {winProb && winProb.points.length > 0 && (
+        <Card>
+          <WinProbChart
+            points={winProb.points}
+            homeTeam={game.home_team.abbreviation}
+            awayTeam={game.away_team.abbreviation}
+          />
+        </Card>
+      )}
+
+      {/* Live shot chart */}
+      {shotChart && shotChart.shots.length > 0 && (
+        <Card>
+          <ShotChart
+            shots={shotChart.shots}
+            title={`Live shot chart \u00b7 ${shotChart.total_shots} shots`}
+          />
+        </Card>
+      )}
     </div>
   );
 }

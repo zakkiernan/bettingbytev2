@@ -6,10 +6,6 @@ from typing import Any, Callable
 
 import requests
 
-from api.services.stats_signal_service import (
-    persist_current_signal_snapshots,
-    repair_current_signal_snapshots as repair_current_signal_snapshots_impl,
-)
 from database.db import init_db
 from ingestion.fanduel_client import fetch_current_prop_board
 from ingestion.injury_reports import (
@@ -44,6 +40,10 @@ from ingestion.nba_client import (
     get_todays_games_bundle,
     get_win_probability_bundle,
     normalize_game_summary,
+)
+from ingestion.nba.signal_jobs import (
+    persist_current_signal_snapshots,
+    repair_current_signal_snapshots as repair_current_signal_snapshots_impl,
 )
 from ingestion.rotation_provider import get_rotation_bundle
 from ingestion.rotation_sync import (
@@ -158,6 +158,78 @@ def _players_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(deduped.values())
 
 
+def _extract_upstream_failures(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    failures: list[dict[str, Any]] = []
+    for payload in payloads:
+        payload_body = payload.get("payload")
+        if not isinstance(payload_body, dict) or payload_body.get("status") != "error":
+            continue
+        failures.append(
+            {
+                "payload_type": str(payload.get("payload_type") or payload_body.get("endpoint") or "unknown"),
+                "endpoint": str(payload_body.get("endpoint") or payload.get("payload_type") or "unknown"),
+                "identifier": payload_body.get("identifier") or payload.get("external_id"),
+                "error_type": payload_body.get("error_type"),
+                "error_message": str(payload_body.get("error_message") or "Unknown upstream failure"),
+            }
+        )
+    return failures
+
+
+def _record_upstream_failures(
+    payloads: list[dict[str, Any]],
+    *,
+    run_id: int | None,
+    stage: str,
+    entity_type: str,
+    default_entity_key: str,
+    extra_metrics: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    failures = _extract_upstream_failures(payloads)
+    if run_id is None:
+        return failures
+
+    for failure in failures:
+        metrics = dict(extra_metrics or {})
+        metrics["payload_type"] = failure["payload_type"]
+        metrics["endpoint"] = failure["endpoint"]
+        if failure["identifier"] is not None:
+            metrics["identifier"] = failure["identifier"]
+        if failure["error_type"] is not None:
+            metrics["error_type"] = failure["error_type"]
+        create_ingestion_run_item(
+            run_id=run_id,
+            entity_type=entity_type,
+            entity_key=str(failure["identifier"] or default_entity_key),
+            stage=stage,
+            status="failed",
+            metrics=metrics,
+            error_text=failure["error_message"],
+        )
+
+    return failures
+
+
+def _write_payloads_with_failure_audit(
+    payloads: list[dict[str, Any]],
+    *,
+    run_id: int | None,
+    stage: str,
+    entity_type: str,
+    default_entity_key: str,
+    extra_metrics: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    write_source_payloads(payloads)
+    return _record_upstream_failures(
+        payloads,
+        run_id=run_id,
+        stage=stage,
+        entity_type=entity_type,
+        default_entity_key=default_entity_key,
+        extra_metrics=extra_metrics,
+    )
+
+
 def _sync_reference_entities_impl(run_id: int | None = None) -> dict[str, int]:
     teams = get_static_teams()
     players = get_static_players()
@@ -215,7 +287,14 @@ def _sync_prop_snapshot_phase_impl(snapshot_phase: str, run_id: int | None = Non
 
     schedule_games_today, schedule_payloads_today = get_todays_games_bundle()
 
-    write_source_payloads(payloads + schedule_payloads_today)
+    upstream_failures = _write_payloads_with_failure_audit(
+        payloads + schedule_payloads_today,
+        run_id=run_id,
+        stage="scoreboard_schedule",
+        entity_type="schedule",
+        default_entity_key=f"snapshot_phase:{snapshot_phase}",
+        extra_metrics={"snapshot_phase": snapshot_phase},
+    )
     write_games(schedule_games_today)
     write_players(_players_from_rows(props))
     write_sportsbook_event_mappings(event_mappings)
@@ -229,6 +308,7 @@ def _sync_prop_snapshot_phase_impl(snapshot_phase: str, run_id: int | None = Non
         "unmapped_events": unmapped_events,
         "raw_payloads": len(payloads) + len(schedule_payloads_today),
         "schedule_games": len(schedule_games_today),
+        "upstream_failures": len(upstream_failures),
     }
 
 
@@ -250,7 +330,14 @@ def _sync_odds_accumulation_impl(run_id: int | None = None) -> dict[str, Any]:
     schedule_games_today, schedule_payloads_today = get_todays_games_bundle()
     schedule_games_tomorrow, schedule_payloads_tomorrow = get_todays_games_bundle(date.today() + timedelta(days=1))
 
-    write_source_payloads(payloads + schedule_payloads_today + schedule_payloads_tomorrow)
+    upstream_failures = _write_payloads_with_failure_audit(
+        payloads + schedule_payloads_today + schedule_payloads_tomorrow,
+        run_id=run_id,
+        stage="scoreboard_schedule",
+        entity_type="schedule",
+        default_entity_key="odds_accumulation",
+        extra_metrics={"market_phase": "accumulation"},
+    )
     write_games(schedule_games_today + schedule_games_tomorrow)
     write_players(_players_from_rows(props))
     write_sportsbook_event_mappings(event_mappings)
@@ -263,6 +350,7 @@ def _sync_odds_accumulation_impl(run_id: int | None = None) -> dict[str, Any]:
         "raw_payloads": len(payloads) + len(schedule_payloads_today) + len(schedule_payloads_tomorrow),
         "schedule_games": len(schedule_games_today) + len(schedule_games_tomorrow),
         "market_phase": "accumulation",
+        "upstream_failures": len(upstream_failures),
     }
 
 
@@ -281,7 +369,13 @@ def _sync_pregame_markets_impl(run_id: int | None = None) -> dict[str, int]:
     schedule_games_today, schedule_payloads_today = get_todays_games_bundle()
     schedule_games_tomorrow, schedule_payloads_tomorrow = get_todays_games_bundle(date.today() + timedelta(days=1))
 
-    write_source_payloads(payloads + schedule_payloads_today + schedule_payloads_tomorrow)
+    upstream_failures = _write_payloads_with_failure_audit(
+        payloads + schedule_payloads_today + schedule_payloads_tomorrow,
+        run_id=run_id,
+        stage="scoreboard_schedule",
+        entity_type="schedule",
+        default_entity_key="pregame_markets",
+    )
     write_games(schedule_games_today + schedule_games_tomorrow)
     write_players(_players_from_rows(props))
     write_sportsbook_event_mappings(event_mappings)
@@ -290,7 +384,13 @@ def _sync_pregame_markets_impl(run_id: int | None = None) -> dict[str, int]:
 
     pregame_context_result = sync_current_pregame_context(captured_at=board.get("captured_at"), stat_type="points")
     pregame_context_payloads = build_pregame_context_source_payloads(pregame_context_result)
-    write_source_payloads(pregame_context_payloads)
+    _write_payloads_with_failure_audit(
+        pregame_context_payloads,
+        run_id=run_id,
+        stage="pregame_context_payload",
+        entity_type="pregame_context",
+        default_entity_key="current",
+    )
     signal_snapshot_metrics = persist_current_signal_snapshots()
     if run_id is not None:
         create_ingestion_run_item(
@@ -315,6 +415,7 @@ def _sync_pregame_markets_impl(run_id: int | None = None) -> dict[str, int]:
         "pregame_context_missing_game_count": len(pregame_context_result.attachment_metrics.get("missing_context_game_ids", [])),
         "pregame_context_projected_unavailable_count": int(pregame_context_result.attachment_metrics.get("projected_unavailable_count", 0)),
         "pregame_context_high_late_scratch_risk_count": int(pregame_context_result.attachment_metrics.get("high_late_scratch_risk_count", 0)),
+        "upstream_failures": len(upstream_failures),
         **signal_snapshot_metrics,
     }
 
@@ -351,7 +452,13 @@ def _sync_live_state_and_markets_impl(run_id: int | None = None) -> dict[str, An
     write_odds_snapshot(props, market_phase="live")
 
     live_games, live_payloads = get_live_scoreboard_bundle()
-    write_source_payloads(live_payloads)
+    live_scoreboard_failures = _write_payloads_with_failure_audit(
+        live_payloads,
+        run_id=run_id,
+        stage="live_scoreboard",
+        entity_type="feed",
+        default_entity_key="live_scoreboard",
+    )
     write_games(live_games)
     write_live_game_snapshots(live_games)
 
@@ -361,8 +468,18 @@ def _sync_live_state_and_markets_impl(run_id: int | None = None) -> dict[str, An
     active_games = [game for game in live_games if game.get("game_status") == STATUS_LIVE]
     for game in active_games:
         snapshots, box_payloads = get_live_boxscore_bundle(game["game_id"])
-        write_source_payloads(box_payloads)
+        box_failures = _write_payloads_with_failure_audit(
+            box_payloads,
+            run_id=run_id,
+            stage="live_boxscore",
+            entity_type="game",
+            default_entity_key=game["game_id"],
+            extra_metrics={"game_id": game["game_id"]},
+        )
         box_payload_count += len(box_payloads)
+        if box_failures:
+            live_boxscore_failures.append(game["game_id"])
+            continue
         if not snapshots:
             live_boxscore_failures.append(game["game_id"])
             create_ingestion_run_item(
@@ -396,6 +513,7 @@ def _sync_live_state_and_markets_impl(run_id: int | None = None) -> dict[str, An
         "active_games": len(active_games),
         "live_player_snapshots": len(live_player_snapshots),
         "live_boxscore_failures": len(live_boxscore_failures),
+        "live_scoreboard_failures": len(live_scoreboard_failures),
         "raw_payloads": len(payloads) + len(live_payloads) + box_payload_count,
     }
 
@@ -642,7 +760,13 @@ def backfill_historical_rotations(
 
 def _sync_postgame_enrichment_impl(run_id: int | None = None) -> dict[str, Any]:
     live_games, live_payloads = get_live_scoreboard_bundle()
-    write_source_payloads(live_payloads)
+    _write_payloads_with_failure_audit(
+        live_payloads,
+        run_id=run_id,
+        stage="live_scoreboard",
+        entity_type="feed",
+        default_entity_key="postgame_live_scoreboard",
+    )
     finished_game_ids = [game["game_id"] for game in live_games if game.get("game_status") == STATUS_FINISHED]
     return _backfill_postgame_enrichment_impl(
         season=DEFAULT_SEASON,
@@ -658,9 +782,16 @@ def sync_postgame_enrichment() -> dict[str, Any]:
 
 def _sync_daily_team_defense_impl(season: str = DEFAULT_SEASON, run_id: int | None = None) -> dict[str, Any]:
     defensive_stats, payloads = get_team_defensive_stats_bundle(season=season)
-    write_source_payloads(payloads)
+    upstream_failures = _write_payloads_with_failure_audit(
+        payloads,
+        run_id=run_id,
+        stage="team_defense_fetch",
+        entity_type="season",
+        default_entity_key=season,
+        extra_metrics={"season": season},
+    )
     write_team_defensive_stats(defensive_stats)
-    return {"season": season, "team_defense_rows": len(defensive_stats), "raw_payloads": len(payloads)}
+    return {"season": season, "team_defense_rows": len(defensive_stats), "raw_payloads": len(payloads), "upstream_failures": len(upstream_failures)}
 
 
 def sync_daily_team_defense(season: str = DEFAULT_SEASON) -> dict[str, Any]:
@@ -669,10 +800,17 @@ def sync_daily_team_defense(season: str = DEFAULT_SEASON) -> dict[str, Any]:
 
 def _sync_player_clutch_stats_impl(season: str = DEFAULT_SEASON, run_id: int | None = None) -> dict[str, Any]:
     rows, payloads = get_player_clutch_stats_bundle(season=season)
-    write_source_payloads(payloads)
+    upstream_failures = _write_payloads_with_failure_audit(
+        payloads,
+        run_id=run_id,
+        stage="player_clutch_fetch",
+        entity_type="season",
+        default_entity_key=season,
+        extra_metrics={"season": season},
+    )
     write_players(_players_from_rows(rows))
     write_player_clutch_stats(rows)
-    return {"season": season, "player_clutch_stats_rows": len(rows), "raw_payloads": len(payloads)}
+    return {"season": season, "player_clutch_stats_rows": len(rows), "raw_payloads": len(payloads), "upstream_failures": len(upstream_failures)}
 
 
 def sync_player_clutch_stats(season: str = DEFAULT_SEASON) -> dict[str, Any]:
@@ -681,10 +819,17 @@ def sync_player_clutch_stats(season: str = DEFAULT_SEASON) -> dict[str, Any]:
 
 def _sync_player_hustle_stats_impl(season: str = DEFAULT_SEASON, run_id: int | None = None) -> dict[str, Any]:
     rows, payloads = get_player_hustle_stats_bundle(season=season)
-    write_source_payloads(payloads)
+    upstream_failures = _write_payloads_with_failure_audit(
+        payloads,
+        run_id=run_id,
+        stage="player_hustle_fetch",
+        entity_type="season",
+        default_entity_key=season,
+        extra_metrics={"season": season},
+    )
     write_players(_players_from_rows(rows))
     write_player_hustle_stats(rows)
-    return {"season": season, "player_hustle_stats_rows": len(rows), "raw_payloads": len(payloads)}
+    return {"season": season, "player_hustle_stats_rows": len(rows), "raw_payloads": len(payloads), "upstream_failures": len(upstream_failures)}
 
 
 def sync_player_hustle_stats(season: str = DEFAULT_SEASON) -> dict[str, Any]:
@@ -693,10 +838,17 @@ def sync_player_hustle_stats(season: str = DEFAULT_SEASON) -> dict[str, Any]:
 
 def _sync_player_play_types_impl(season: str = DEFAULT_SEASON, run_id: int | None = None) -> dict[str, Any]:
     rows, payloads = get_player_play_types_bundle(season=season)
-    write_source_payloads(payloads)
+    upstream_failures = _write_payloads_with_failure_audit(
+        payloads,
+        run_id=run_id,
+        stage="player_play_types_fetch",
+        entity_type="season",
+        default_entity_key=season,
+        extra_metrics={"season": season},
+    )
     write_players(_players_from_rows(rows))
     write_player_play_types(rows)
-    return {"season": season, "player_play_type_rows": len(rows), "raw_payloads": len(payloads)}
+    return {"season": season, "player_play_type_rows": len(rows), "raw_payloads": len(payloads), "upstream_failures": len(upstream_failures)}
 
 
 def sync_player_play_types(season: str = DEFAULT_SEASON) -> dict[str, Any]:
@@ -705,10 +857,17 @@ def sync_player_play_types(season: str = DEFAULT_SEASON) -> dict[str, Any]:
 
 def _sync_player_tracking_stats_impl(season: str = DEFAULT_SEASON, run_id: int | None = None) -> dict[str, Any]:
     rows, payloads = get_player_tracking_stats_bundle(season=season)
-    write_source_payloads(payloads)
+    upstream_failures = _write_payloads_with_failure_audit(
+        payloads,
+        run_id=run_id,
+        stage="player_tracking_stats_fetch",
+        entity_type="season",
+        default_entity_key=season,
+        extra_metrics={"season": season},
+    )
     write_players(_players_from_rows(rows))
     write_player_tracking_stats(rows)
-    return {"season": season, "player_tracking_stats_rows": len(rows), "raw_payloads": len(payloads)}
+    return {"season": season, "player_tracking_stats_rows": len(rows), "raw_payloads": len(payloads), "upstream_failures": len(upstream_failures)}
 
 
 def sync_player_tracking_stats(season: str = DEFAULT_SEASON) -> dict[str, Any]:
@@ -717,10 +876,17 @@ def sync_player_tracking_stats(season: str = DEFAULT_SEASON) -> dict[str, Any]:
 
 def _sync_player_on_off_stats_impl(season: str = DEFAULT_SEASON, run_id: int | None = None) -> dict[str, Any]:
     rows, payloads = get_player_on_off_stats_bundle(season=season)
-    write_source_payloads(payloads)
+    upstream_failures = _write_payloads_with_failure_audit(
+        payloads,
+        run_id=run_id,
+        stage="player_on_off_fetch",
+        entity_type="season",
+        default_entity_key=season,
+        extra_metrics={"season": season},
+    )
     write_players(_players_from_rows(rows))
     write_player_on_off_stats(rows)
-    return {"season": season, "player_on_off_stats_rows": len(rows), "raw_payloads": len(payloads)}
+    return {"season": season, "player_on_off_stats_rows": len(rows), "raw_payloads": len(payloads), "upstream_failures": len(upstream_failures)}
 
 
 def sync_player_on_off_stats(season: str = DEFAULT_SEASON) -> dict[str, Any]:
@@ -729,10 +895,17 @@ def sync_player_on_off_stats(season: str = DEFAULT_SEASON) -> dict[str, Any]:
 
 def _sync_player_defensive_tracking_impl(season: str = DEFAULT_SEASON, run_id: int | None = None) -> dict[str, Any]:
     rows, payloads = get_player_defensive_tracking_bundle(season=season)
-    write_source_payloads(payloads)
+    upstream_failures = _write_payloads_with_failure_audit(
+        payloads,
+        run_id=run_id,
+        stage="player_defensive_tracking_fetch",
+        entity_type="season",
+        default_entity_key=season,
+        extra_metrics={"season": season},
+    )
     write_players(_players_from_rows(rows))
     write_player_defensive_tracking(rows)
-    return {"season": season, "player_defensive_tracking_rows": len(rows), "raw_payloads": len(payloads)}
+    return {"season": season, "player_defensive_tracking_rows": len(rows), "raw_payloads": len(payloads), "upstream_failures": len(upstream_failures)}
 
 
 def sync_player_defensive_tracking(season: str = DEFAULT_SEASON) -> dict[str, Any]:
@@ -741,10 +914,17 @@ def sync_player_defensive_tracking(season: str = DEFAULT_SEASON) -> dict[str, An
 
 def _sync_player_shot_locations_impl(season: str = DEFAULT_SEASON, run_id: int | None = None) -> dict[str, Any]:
     rows, payloads = get_player_shot_locations_bundle(season=season)
-    write_source_payloads(payloads)
+    upstream_failures = _write_payloads_with_failure_audit(
+        payloads,
+        run_id=run_id,
+        stage="player_shot_locations_fetch",
+        entity_type="season",
+        default_entity_key=season,
+        extra_metrics={"season": season},
+    )
     write_players(_players_from_rows(rows))
     write_player_shot_location_stats(rows)
-    return {"season": season, "player_shot_location_rows": len(rows), "raw_payloads": len(payloads)}
+    return {"season": season, "player_shot_location_rows": len(rows), "raw_payloads": len(payloads), "upstream_failures": len(upstream_failures)}
 
 
 def sync_player_shot_locations(season: str = DEFAULT_SEASON) -> dict[str, Any]:
@@ -753,9 +933,16 @@ def sync_player_shot_locations(season: str = DEFAULT_SEASON) -> dict[str, Any]:
 
 def _sync_lineup_stats_impl(season: str = DEFAULT_SEASON, run_id: int | None = None) -> dict[str, Any]:
     rows, payloads = get_lineup_stats_bundle(season=season)
-    write_source_payloads(payloads)
+    upstream_failures = _write_payloads_with_failure_audit(
+        payloads,
+        run_id=run_id,
+        stage="lineup_stats_fetch",
+        entity_type="season",
+        default_entity_key=season,
+        extra_metrics={"season": season},
+    )
     write_lineup_stats(rows)
-    return {"season": season, "lineup_stats_rows": len(rows), "raw_payloads": len(payloads)}
+    return {"season": season, "lineup_stats_rows": len(rows), "raw_payloads": len(payloads), "upstream_failures": len(upstream_failures)}
 
 
 def sync_lineup_stats(season: str = DEFAULT_SEASON) -> dict[str, Any]:
@@ -777,7 +964,14 @@ def _backfill_historical_game_logs_impl(
         date_from_nullable=date_from_nullable,
         date_to_nullable=date_to_nullable,
     )
-    write_source_payloads(payloads)
+    upstream_failures = _write_payloads_with_failure_audit(
+        payloads,
+        run_id=run_id,
+        stage="historical_game_logs_fetch",
+        entity_type="season",
+        default_entity_key=season,
+        extra_metrics={"season": season, "season_type": season_type_all_star},
+    )
     write_players(_players_from_rows(game_logs))
     write_historical_game_logs(game_logs)
     unique_game_ids = {row["game_id"] for row in game_logs}
@@ -792,6 +986,7 @@ def _backfill_historical_game_logs_impl(
         "historical_game_logs": len(game_logs),
         "unique_games": len(unique_game_ids),
         "raw_payloads": len(payloads),
+        "upstream_failures": len(upstream_failures),
         **reconciliation,
     }
 
@@ -854,6 +1049,7 @@ def _backfill_postgame_enrichment_impl(
     matchup_boxscore_rows_written = 0
     win_probability_rows_written = 0
     rotation_queue_games_enqueued = 0
+    upstream_failures = 0
     batch_counter = 0
 
     for offset in range(0, total_candidates, batch_size):
@@ -872,7 +1068,7 @@ def _backfill_postgame_enrichment_impl(
             matchup_boxscore_rows, matchup_boxscore_payloads = get_matchup_boxscore_bundle(game_id)
             win_probability_rows, win_probability_payloads = get_win_probability_bundle(game_id)
 
-            write_source_payloads(
+            source_payloads = (
                 summary_payloads
                 + advanced_payloads
                 + tracking_payloads
@@ -881,6 +1077,15 @@ def _backfill_postgame_enrichment_impl(
                 + matchup_boxscore_payloads
                 + win_probability_payloads
             )
+            source_failures = _write_payloads_with_failure_audit(
+                source_payloads,
+                run_id=run_id,
+                stage="postgame_source_fetch",
+                entity_type="game",
+                default_entity_key=game_id,
+                extra_metrics={"game_id": game_id},
+            )
+            upstream_failures += len(source_failures)
 
             normalized_game = normalize_game_summary(summary_data or {}, season=season)
             if normalized_game:
@@ -917,6 +1122,7 @@ def _backfill_postgame_enrichment_impl(
                         "matchup_boxscore_rows": len(matchup_boxscore_rows),
                         "win_probability_rows": len(win_probability_rows),
                         "rotation_queue_games_enqueued": enqueued_count,
+                        "upstream_failures": len(source_failures),
                     },
                     error_text="Advanced and tracking endpoints returned no rows.",
                 )
@@ -941,6 +1147,7 @@ def _backfill_postgame_enrichment_impl(
                     "win_probability_rows": len(win_probability_rows),
                     "merged_players": len(merged_logs),
                     "rotation_queue_games_enqueued": enqueued_count,
+                    "upstream_failures": len(source_failures),
                 },
             )
 
@@ -960,6 +1167,7 @@ def _backfill_postgame_enrichment_impl(
         "player_rotation_games": 0,
         "team_rotation_games": 0,
         "rotation_queue_games_enqueued": rotation_queue_games_enqueued,
+        "upstream_failures": upstream_failures,
         "batches": batch_counter,
         "remaining_backlog": max(total_candidates - processed_games, 0),
         **reconciliation,

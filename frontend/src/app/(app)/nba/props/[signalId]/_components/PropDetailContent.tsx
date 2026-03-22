@@ -14,6 +14,7 @@ import { LineMovement } from "@/components/board/LineMovement";
 import { ConfidenceBar } from "@/components/board/ConfidenceBar";
 import { ContextTag } from "@/components/board/ContextTag";
 import { PlayerAvatar } from "@/components/ui/player-avatar";
+import { ShootingContext } from "./ShootingContext";
 
 export async function PropDetailContent({ signalId }: { signalId: number }) {
   const [prop, lineMovement] = await Promise.all([
@@ -183,6 +184,9 @@ export async function PropDetailContent({ signalId }: { signalId: number }) {
           highlightStat={prop.stat_type}
         />
       </Card>
+
+      {/* Scoring profile context */}
+      <ShootingContext playerId={prop.player_id} statType={prop.stat_type} />
 
       {/* The Model */}
       <details className="group">

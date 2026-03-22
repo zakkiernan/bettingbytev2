@@ -9,6 +9,42 @@ Pregame reliability is still the priority. The codebase is now namespaced for mu
 
 ## What Was Completed
 
+### Stats contract cleanup for new NBA data surfaces
+
+Focused cleanup landed across the new game/player/team stats surfaces to reduce wiring drift between ingestion, API, and frontend consumers.
+
+What changed:
+- added `api/services/nba/stats_contracts.py` as a small shared contract layer for:
+  - default NBA season resolution
+  - NBA season start derivation
+  - probability normalization to percentage points
+  - canonical on/off status normalization
+- removed duplicated hardcoded season handling from:
+  - `api/services/nba/player_stats_service.py`
+  - `api/services/nba/team_stats_service.py`
+  - `api/services/nba/player_service.py`
+  - `api/services/nba/game_context_service.py`
+- fixed win-probability API shaping so decimal probabilities are normalized into percentage points before they hit the frontend chart
+- fixed player shot-chart `last_n` behavior so recency is based on actual game date/time instead of row insertion time
+- normalized on/off API responses to lowercase `on` / `off` and aligned the frontend consumer to that contract
+- fixed defensive tracking UI deltas so `pct_plusminus` is treated consistently as a decimal differential instead of mixing decimal and whole-percent assumptions
+- fixed lineup spotlight qualification to use per-game minutes, matching the lineup endpoint's `PerGame` ingestion mode
+
+Regression coverage added:
+- `tests/nba/test_stats_services.py`
+  - win probability contract normalization
+  - shot-chart recency ordering
+  - on/off status normalization
+
+Verification:
+- `E:\dev\projects\bettingbyte-v2\.venv\Scripts\python.exe -m pytest tests/ -q` -> `173 passed`
+- `E:\dev\projects\bettingbyte-v2\.venv\Scripts\python.exe -m compileall analytics api ingestion database tests` -> success
+
+Frontend verification note:
+- attempted frontend build verification
+- `pnpm` is not installed in the current environment
+- `npm run build` could not be completed because the local tool sandbox errored during command setup
+
 ### NBA ingestion now pulls 12 additional stats.nba.com endpoints
 
 Added 12 new NBA ingestion surfaces across the existing client -> writer -> job -> scheduler pipeline:

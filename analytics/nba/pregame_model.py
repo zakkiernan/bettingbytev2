@@ -7,12 +7,12 @@ from statistics import NormalDist
 from typing import Any
 
 from analytics.features_pregame import PregamePointsFeatures, build_pregame_points_features
+from analytics.nba.model_signal_generation import generate_model_signals, persist_generated_model_signals
 from analytics.opportunity_model import (
     PregameOpportunityModelConfig,
     PregameOpportunityProjection,
     project_pregame_opportunity,
 )
-from ingestion.writer import write_model_signals
 
 MODEL_NAME = "pregame_points_baseline"
 MODEL_VERSION = "v3"
@@ -371,9 +371,12 @@ def generate_pregame_points_signals(
     limit: int | None = None,
     persist: bool = False,
 ) -> list[dict[str, Any]]:
-    features = build_pregame_points_features(captured_at=captured_at, limit=limit)
-    projections = [project_pregame_points(feature) for feature in features]
-    signals = [projection.to_signal() for projection in projections]
-    if persist and signals:
-        write_model_signals(signals)
+    signals = generate_model_signals(
+        build_features=build_pregame_points_features,
+        project=project_pregame_points,
+        captured_at=captured_at,
+        limit=limit,
+    )
+    if persist:
+        persist_generated_model_signals(signals)
     return signals

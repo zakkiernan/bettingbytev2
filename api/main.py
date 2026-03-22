@@ -11,6 +11,7 @@ from api.routes import (
     nba_live_router,
     nba_players_router,
     nba_props_router,
+    nba_teams_router,
 )
 
 app = FastAPI(title="BettingByte API", version="0.1.0")
@@ -26,6 +27,7 @@ app.include_router(nba_props_router, prefix="/api/nba")
 app.include_router(nba_edges_router, prefix="/api/nba")
 app.include_router(nba_players_router, prefix="/api/nba")
 app.include_router(nba_live_router, prefix="/api/nba")
+app.include_router(nba_teams_router, prefix="/api/nba")
 
 # Backward-compat NBA routes at /api
 app.include_router(nba_games_router, prefix="/api")

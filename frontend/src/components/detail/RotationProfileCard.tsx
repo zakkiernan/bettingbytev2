@@ -62,7 +62,7 @@ export function RotationProfileCard({ rotation }: Props) {
 
       {minutesData.length > 0 && (
         <div className="h-32">
-          <ResponsiveContainer width="100%" height="100%">
+          <ResponsiveContainer width="100%" height="100%" minWidth={0}>
             <BarChart data={minutesData} margin={{ top: 4, right: 4, bottom: 0, left: -20 }}>
               <XAxis dataKey="game" tick={{ fontSize: 10, fill: "var(--color-text-muted)" }} axisLine={false} tickLine={false} />
               <YAxis tick={{ fontSize: 10, fill: "var(--color-text-muted)" }} axisLine={false} tickLine={false} />

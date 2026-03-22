@@ -12,6 +12,7 @@ from api.schemas.game_context import (
     TeamDefenseSnapshot,
     TeamGameContext,
 )
+from api.services.nba.stats_contracts import resolve_nba_season
 from database.models import (
     Game,
     OfficialInjuryReportEntry,
@@ -20,12 +21,6 @@ from database.models import (
     TeamDefensiveStat,
 )
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-_CURRENT_SEASON = "2025-26"
-
 
 def _build_team_context(
     db: Session,
@@ -33,6 +28,7 @@ def _build_team_context(
     team_abbreviation: str,
     team_name: str | None,
     game_date: date | None,
+    season: str,
 ) -> TeamGameContext:
     """Build the full context for one team in a game."""
 
@@ -121,7 +117,7 @@ def _build_team_context(
     def_row = db.execute(
         select(TeamDefensiveStat).where(
             TeamDefensiveStat.team_name == team_name,
-            TeamDefensiveStat.season == _CURRENT_SEASON,
+            TeamDefensiveStat.season == season,
         )
     ).scalars().first()
 
@@ -134,7 +130,7 @@ def _build_team_context(
             def_row = db.execute(
                 select(TeamDefensiveStat).where(
                     TeamDefensiveStat.team_id == team_obj.team_id,
-                    TeamDefensiveStat.season == _CURRENT_SEASON,
+                    TeamDefensiveStat.season == season,
                 )
             ).scalars().first()
 
@@ -165,6 +161,7 @@ def _build_team_context(
 
 def get_game_context(db: Session, game_id: str) -> GameContextResponse | None:
     """Build full pregame context for a game: both teams' lineups, injuries, defense."""
+    season = resolve_nba_season()
     game = db.get(Game, game_id)
     if game is None:
         return None
@@ -192,12 +189,14 @@ def get_game_context(db: Session, game_id: str) -> GameContextResponse | None:
         game.home_team_abbreviation or "???",
         home_name,
         game_dt,
+        season,
     )
     away_ctx = _build_team_context(
         db, game_id,
         game.away_team_abbreviation or "???",
         away_name,
         game_dt,
+        season,
     )
 
     # Pace matchup: average of both teams

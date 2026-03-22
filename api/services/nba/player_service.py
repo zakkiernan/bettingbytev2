@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from api.schemas.board import PropBoardRow
 from api.schemas.detail import GameLogEntry
 from api.schemas.players import PlayerProfileResponse, SeasonAverages, SignalHistoryEntry, TrendPoint
+from api.services.nba.stats_contracts import nba_season_start, resolve_nba_season
 from api.services import stats_signal_service
 from database.models import (
     Game,
@@ -15,12 +16,6 @@ from database.models import (
     Player,
     Team,
 )
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-_CURRENT_SEASON = "2025-26"
 
 
 def _today_window() -> tuple[datetime, datetime]:
@@ -84,8 +79,7 @@ def get_player_profile(db: Session, player_id: str) -> PlayerProfileResponse | N
     if player is None:
         return None
 
-    # Season averages — filter to current season via game_date range
-    season_start = datetime(2025, 10, 1)
+    season_start = nba_season_start(resolve_nba_season())
     logs = (
         db.execute(
             select(HistoricalGameLog)

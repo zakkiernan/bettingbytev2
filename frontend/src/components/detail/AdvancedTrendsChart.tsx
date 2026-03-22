@@ -77,7 +77,7 @@ export function AdvancedTrendsChart({ trends }: Props) {
       </div>
 
       <div className="h-48">
-        <ResponsiveContainer width="100%" height="100%">
+        <ResponsiveContainer width="100%" height="100%" minWidth={0}>
           <LineChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: -16 }}>
             <XAxis dataKey="game" tick={{ fontSize: 10, fill: "var(--color-text-muted)" }} axisLine={false} tickLine={false} />
             <YAxis tick={{ fontSize: 10, fill: "var(--color-text-muted)" }} axisLine={false} tickLine={false} />

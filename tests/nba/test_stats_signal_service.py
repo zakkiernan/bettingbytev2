@@ -614,7 +614,7 @@ class SignalRunHealthTests(unittest.TestCase):
 
         with self.session_scope() as session:
             with patch(
-                "api.services.stats_signal_service._build_cards_from_snapshots",
+                "api.services.nba.stats_signal_queries._build_cards_from_snapshots",
                 return_value=[_FakeCard(ready_row), _FakeCard(blocked_row)],
             ):
                 health = build_signal_run_health(session, ["G1"])
@@ -750,11 +750,11 @@ class SignalSnapshotPersistenceTests(unittest.TestCase):
             ),
         )
 
-        with patch("api.services.stats_signal_service.session_scope", self.session_scope), patch(
-            "api.services.stats_signal_service._load_current_snapshots",
+        with patch("ingestion.nba.signal_jobs.session_scope", self.session_scope), patch(
+            "ingestion.nba.signal_jobs._load_current_snapshots",
             return_value=[snapshot],
         ), patch(
-            "api.services.stats_signal_service._build_cards_from_snapshots",
+            "ingestion.nba.signal_jobs._build_cards_from_snapshots",
             return_value=[fake_card],
         ):
             metrics = persist_current_signal_snapshots()
@@ -931,8 +931,8 @@ class SignalSnapshotRepairTests(unittest.TestCase):
                 )
             )
 
-        with patch("api.services.stats_signal_service.session_scope", self.session_scope), patch(
-            "api.services.stats_signal_service._load_current_snapshots",
+        with patch("ingestion.nba.signal_jobs.session_scope", self.session_scope), patch(
+            "ingestion.nba.signal_jobs._load_current_snapshots",
             return_value=[snapshot],
         ):
             metrics = repair_current_signal_snapshots()
@@ -993,11 +993,11 @@ class SignalSnapshotRepairTests(unittest.TestCase):
                 )
             )
 
-        with patch("api.services.stats_signal_service.session_scope", self.session_scope), patch(
-            "api.services.stats_signal_service._load_current_snapshots",
+        with patch("ingestion.nba.signal_jobs.session_scope", self.session_scope), patch(
+            "ingestion.nba.signal_jobs._load_current_snapshots",
             return_value=[snapshot],
         ), patch(
-            "api.services.stats_signal_service._build_cards_from_snapshots",
+            "ingestion.nba.signal_jobs._build_cards_from_snapshots",
             return_value=[fake_card],
         ):
             metrics = repair_current_signal_snapshots()

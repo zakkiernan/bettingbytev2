@@ -5,6 +5,8 @@ import TopPicksSection from "./_components/TopPicksSection";
 import LiveGamesStrip from "./_components/LiveGamesStrip";
 import TonightGamesSection from "./_components/TonightGamesSection";
 import QuickStatsRow from "./_components/QuickStatsRow";
+import HustleSpotlight from "./_components/HustleSpotlight";
+import MatchupPreview from "./_components/MatchupPreview";
 
 export const dynamic = "force-dynamic";
 
@@ -25,6 +27,20 @@ function PicksSkeleton() {
       ))}
     </div>
   );
+}
+
+function SpotlightSkeleton() {
+  return (
+    <div className="grid gap-3 sm:grid-cols-3">
+      {Array.from({ length: 3 }).map((_, i) => (
+        <Skeleton key={i} className="h-[140px]" />
+      ))}
+    </div>
+  );
+}
+
+function MatchupSkeleton() {
+  return <Skeleton className="h-[120px]" />;
 }
 
 function LiveStripSkeleton() {
@@ -72,6 +88,19 @@ export default function DashboardPage() {
         </p>
         <Suspense fallback={<PicksSkeleton />}>
           <TopPicksSection />
+        </Suspense>
+      </section>
+
+      {/* Matchup of the Night + Hustle Spotlight */}
+      <section className="space-y-3">
+        <Suspense fallback={<MatchupSkeleton />}>
+          <MatchupPreview />
+        </Suspense>
+      </section>
+
+      <section className="space-y-3">
+        <Suspense fallback={<SpotlightSkeleton />}>
+          <HustleSpotlight />
         </Suspense>
       </section>
 

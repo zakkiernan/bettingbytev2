@@ -29,7 +29,14 @@ engine_kwargs: dict[str, object] = {}
 if DATABASE_URL.startswith("sqlite"):
     engine_kwargs["connect_args"] = {"check_same_thread": False}
 
-engine = create_engine(DATABASE_URL, future=True, **engine_kwargs)
+engine = create_engine(
+    DATABASE_URL,
+    future=True,
+    pool_size=20,
+    max_overflow=30,
+    pool_timeout=60,
+    **engine_kwargs,
+)
 
 # Enable WAL mode for SQLite so readers don't block on writers (scheduler).
 if DATABASE_URL.startswith("sqlite"):

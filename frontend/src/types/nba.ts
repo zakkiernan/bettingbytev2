@@ -397,4 +397,323 @@ export interface LineMovementResponse {
   snapshots: LineMovementPoint[];
 }
 
+// Shot Chart types
 
+export interface ShotChartShot {
+  game_id: string;
+  loc_x: number;
+  loc_y: number;
+  shot_made: boolean;
+  shot_type?: string | null;
+  action_type?: string | null;
+  shot_zone_basic?: string | null;
+  shot_zone_area?: string | null;
+  shot_zone_range?: string | null;
+  shot_distance?: number | null;
+  period?: number | null;
+  minutes_remaining?: number | null;
+  seconds_remaining?: number | null;
+}
+
+export interface ShotChartResponse {
+  player_id: string;
+  player_name: string;
+  total_shots: number;
+  field_goal_pct: number;
+  shots: ShotChartShot[];
+}
+
+// Shot Locations (Zone Aggregates)
+
+export interface ShotZone {
+  zone: string;
+  fgm: number;
+  fga: number;
+  fg_pct: number;
+}
+
+export interface ShotLocationsResponse {
+  player_id: string;
+  player_name: string;
+  season: string;
+  zones: ShotZone[];
+}
+
+// Play Types (Synergy)
+
+export interface PlayTypeEntry {
+  play_type: string;
+  type_grouping: string;
+  gp?: number | null;
+  poss_pct?: number | null;
+  ppp?: number | null;
+  fg_pct?: number | null;
+  ft_poss_pct?: number | null;
+  tov_pct?: number | null;
+  sf_pct?: number | null;
+  score_pct?: number | null;
+  efg_pct?: number | null;
+  poss?: number | null;
+  pts?: number | null;
+  percentile?: number | null;
+}
+
+export interface PlayTypesResponse {
+  player_id: string;
+  player_name: string;
+  season: string;
+  offensive: PlayTypeEntry[];
+  defensive: PlayTypeEntry[];
+}
+
+// Hustle Stats
+
+export interface HustleStatsSeason {
+  games_played?: number | null;
+  minutes?: number | null;
+  contested_shots_2pt?: number | null;
+  contested_shots_3pt?: number | null;
+  contested_shots?: number | null;
+  deflections?: number | null;
+  charges_drawn?: number | null;
+  screen_assists?: number | null;
+  screen_ast_pts?: number | null;
+  loose_balls_recovered?: number | null;
+  box_outs?: number | null;
+}
+
+export interface HustleStatsResponse {
+  player_id: string;
+  player_name: string;
+  season: string;
+  season_totals?: HustleStatsSeason | null;
+}
+
+// Tracking Stats
+
+export interface TrackingMeasure {
+  measure_type: string;
+  gp?: number | null;
+  minutes?: number | null;
+  fgm?: number | null;
+  fga?: number | null;
+  fg_pct?: number | null;
+  fg3m?: number | null;
+  fg3a?: number | null;
+  fg3_pct?: number | null;
+  efg_pct?: number | null;
+  pts?: number | null;
+  drives?: number | null;
+  drive_fgm?: number | null;
+  drive_fga?: number | null;
+  drive_fg_pct?: number | null;
+  drive_ftm?: number | null;
+  drive_fta?: number | null;
+  drive_ft_pct?: number | null;
+  drive_pts?: number | null;
+  drive_ast?: number | null;
+  drive_tov?: number | null;
+}
+
+export interface TrackingResponse {
+  player_id: string;
+  player_name: string;
+  season: string;
+  measures: TrackingMeasure[];
+}
+
+// Defensive Tracking
+
+export interface DefensiveZone {
+  defense_category: string;
+  gp?: number | null;
+  freq?: number | null;
+  d_fgm?: number | null;
+  d_fga?: number | null;
+  d_fg_pct?: number | null;
+  normal_fg_pct?: number | null;
+  pct_plusminus?: number | null;
+}
+
+export interface DefensiveTrackingResponse {
+  player_id: string;
+  player_name: string;
+  season: string;
+  zones: DefensiveZone[];
+}
+
+// On/Off Court
+
+export interface OnOffSplit {
+  court_status: string;
+  gp?: number | null;
+  min?: number | null;
+  off_rating?: number | null;
+  def_rating?: number | null;
+  net_rating?: number | null;
+  ast_pct?: number | null;
+  ast_to?: number | null;
+  oreb_pct?: number | null;
+  dreb_pct?: number | null;
+  reb_pct?: number | null;
+  tov_pct?: number | null;
+  efg_pct?: number | null;
+  ts_pct?: number | null;
+  pace?: number | null;
+  pie?: number | null;
+  plus_minus?: number | null;
+}
+
+export interface OnOffResponse {
+  player_id: string;
+  player_name: string;
+  season: string;
+  splits: OnOffSplit[];
+}
+
+// Clutch Stats
+
+export interface ClutchStatsEntry {
+  clutch_time: string;
+  point_diff: number;
+  gp?: number | null;
+  w?: number | null;
+  l?: number | null;
+  min?: number | null;
+  fgm?: number | null;
+  fga?: number | null;
+  fg_pct?: number | null;
+  fg3m?: number | null;
+  fg3a?: number | null;
+  fg3_pct?: number | null;
+  ftm?: number | null;
+  fta?: number | null;
+  ft_pct?: number | null;
+  reb?: number | null;
+  ast?: number | null;
+  tov?: number | null;
+  stl?: number | null;
+  blk?: number | null;
+  pts?: number | null;
+  plus_minus?: number | null;
+}
+
+export interface ClutchResponse {
+  player_id: string;
+  player_name: string;
+  season: string;
+  entries: ClutchStatsEntry[];
+}
+
+// Game Matchups
+
+export interface GameMatchup {
+  offense_player_id: string;
+  offense_player_name: string;
+  defense_player_id: string;
+  defense_player_name: string;
+  matchup_minutes: number;
+  partial_possessions?: number | null;
+  player_points?: number | null;
+  switches_on?: number | null;
+  matchup_field_goals_made?: number | null;
+  matchup_field_goals_attempted?: number | null;
+  matchup_field_goal_percentage?: number | null;
+  matchup_assists?: number | null;
+  matchup_turnovers?: number | null;
+}
+
+export interface GameMatchupsResponse {
+  game_id: string;
+  matchups: GameMatchup[];
+}
+
+// Win Probability
+
+export interface WinProbPoint {
+  event_num: number;
+  home_pct: number;
+  visitor_pct: number;
+  home_pts: number;
+  visitor_pts: number;
+  period: number;
+  seconds_remaining: number;
+  description?: string | null;
+}
+
+export interface WinProbResponse {
+  game_id: string;
+  points: WinProbPoint[];
+}
+
+// Game Hustle
+
+export interface GameHustleRow {
+  player_id: string;
+  player_name: string;
+  team_id: string;
+  minutes?: number | null;
+  contested_shots?: number | null;
+  contested_shots_2pt?: number | null;
+  contested_shots_3pt?: number | null;
+  deflections?: number | null;
+  charges_drawn?: number | null;
+  screen_assists?: number | null;
+  loose_balls_recovered?: number | null;
+  box_outs?: number | null;
+}
+
+export interface GameHustleResponse {
+  game_id: string;
+  players: GameHustleRow[];
+}
+
+// Game Shot Chart
+
+export interface GameShotChartResponse {
+  game_id: string;
+  total_shots: number;
+  shots: ShotChartShot[];
+}
+
+// Team Lineups
+
+export interface TeamLineupEntry {
+  group_id: string;
+  group_name: string;
+  gp?: number | null;
+  min?: number | null;
+  off_rating?: number | null;
+  def_rating?: number | null;
+  net_rating?: number | null;
+  pace?: number | null;
+  ts_pct?: number | null;
+  efg_pct?: number | null;
+  plus_minus?: number | null;
+}
+
+export interface TeamLineupsResponse {
+  team_id: string;
+  team_abbreviation?: string | null;
+  season: string;
+  lineups: TeamLineupEntry[];
+}
+
+export interface TeamDefenseProfile {
+  team_id: string;
+  team_name: string;
+  season: string;
+  defensive_rating?: number | null;
+  pace?: number | null;
+  opponent_points_per_game?: number | null;
+  opponent_field_goal_percentage?: number | null;
+  opponent_three_point_percentage?: number | null;
+}
+
+export interface TeamProfileResponse {
+  team_id: string;
+  team_abbreviation?: string | null;
+  team_name: string;
+  lineups: TeamLineupsResponse;
+  defense?: TeamDefenseProfile | null;
+}

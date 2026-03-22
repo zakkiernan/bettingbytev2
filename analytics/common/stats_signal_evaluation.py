@@ -27,14 +27,14 @@ from analytics.features_opportunity import (
     build_pregame_feature_seed,
 )
 from analytics.features_pregame import build_pregame_points_features_from_seed
+from analytics.nba.signals_profile import (
+    build_fallback_signal_profile,
+    build_stats_signal_profile,
+)
+from analytics.nba.signals_readiness import build_signal_readiness
 from analytics.pregame_context_loader import (
     build_pregame_context_index,
     load_pregame_context_snapshot_rows,
-)
-from api.services.stats_signal_service import (
-    build_fallback_signal_profile,
-    build_signal_readiness,
-    build_stats_signal_profile,
 )
 from database.db import session_scope
 from database.models import (
