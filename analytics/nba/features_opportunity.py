@@ -967,13 +967,17 @@ def _build_absence_impact_context(
     source_count = 0
     for summary in matched_summaries[:3]:
         sample_confidence = float(summary.sample_confidence or 0.0)
-        if sample_confidence < 0.25:
+        if sample_confidence < 0.40:
             continue
-        if int(summary.source_out_game_count or 0) < 3:
+        source_out = int(summary.source_out_game_count or 0)
+        beneficiary_out = int(summary.beneficiary_out_game_count or 0)
+        if source_out < 5:
             continue
-        if int(summary.beneficiary_out_game_count or 0) < 3:
+        if beneficiary_out < 5:
             continue
-        if abs(float(summary.impact_score or 0.0)) < 0.05:
+        if source_out + beneficiary_out < 12:
+            continue
+        if abs(float(summary.impact_score or 0.0)) < 0.10:
             continue
         weight = min(sample_confidence, 1.0)
         minutes_delta += float(summary.minutes_delta or 0.0) * weight
