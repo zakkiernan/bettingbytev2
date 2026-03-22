@@ -52,6 +52,7 @@ class PregamePointsModelConfig:
     back_to_back_penalty: float = 0.65
     rest_bonus_per_day: float = 0.12
     rest_bonus_max_days: int = 2
+    vacancy_bonus_dampener: float = 0.75
     context_clamp: float = 1.2
     opportunity_confidence_weight: float = 0.26
     opportunity_score_weight: float = 0.26
@@ -199,9 +200,11 @@ def project_pregame_points(
         ) if opportunity_config is not None else project_pregame_opportunity(features)
     opportunity = opportunity_projection.breakdown
 
-    expected_minutes = opportunity.expected_minutes
-    expected_usage_pct = opportunity.expected_usage_pct
-    expected_est_usage_pct = opportunity.expected_est_usage_pct
+    vacancy_minutes_bonus = _value_or_zero(opportunity.vacated_minutes_bonus) + _value_or_zero(opportunity.role_replacement_minutes_bonus)
+    expected_minutes = opportunity.expected_minutes - vacancy_minutes_bonus * (1.0 - config.vacancy_bonus_dampener)
+    vacancy_usage_bonus = _value_or_zero(opportunity.vacated_usage_bonus) + _value_or_zero(opportunity.role_replacement_usage_bonus)
+    expected_usage_pct = opportunity.expected_usage_pct - vacancy_usage_bonus * (1.0 - config.vacancy_bonus_dampener)
+    expected_est_usage_pct = opportunity.expected_est_usage_pct - vacancy_usage_bonus * 0.85 * (1.0 - config.vacancy_bonus_dampener)
     expected_touches = opportunity.expected_touches
 
     points_per_minute = _weighted_average(
