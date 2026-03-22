@@ -1,6 +1,6 @@
 # Project State
 
-Last updated: 2026-03-18
+Last updated: 2026-03-22
 Project root: `E:\dev\projects\bettingbyte-v2`
 
 ## Product Goal
@@ -17,37 +17,28 @@ Frontend remains frozen.
 
 - Historical game logs, advanced logs, and rotation data are live.
 - Official NBA injury-report ingestion/backfill is live.
-- Injury-report player matching now uses one canonical normalizer in `analytics/name_matching.py`.
-- Local injury-entry backfill resolved all named `player_id = NULL` rows.
+- Injury-report player matching uses one canonical normalizer in `analytics/name_matching.py`.
+  - named entry match rate: `100.00%`
 - FanDuel pregame and live odds ingestion is live.
-- `odds_snapshots` now captures:
-  - phased pregame writes (`early`, `late`, `tip`)
-  - rolling pregame accumulation (`accumulation`)
-  - live snapshots (`live`)
-- New append-only signal audit table exists:
-  - `signal_audit_trail`
-- Health reporting now covers:
-  - line archive density
-  - injury-entry match coverage
-  - readiness counts by stat type
-  - blocker reason counts
-  - audit coverage summary
+- `odds_snapshots` captures phased pregame writes, rolling accumulation, and live snapshots.
+- Append-only `signal_audit_trail` table is live.
+- 12 additional stats.nba.com ingestion surfaces are live (shot chart, hustle, matchup, win probability, clutch, synergy, tracking, on/off, defensive, shot locations, lineup stats).
+- Health reporting covers line archive density, injury match coverage, readiness/blocker counts, and audit summary.
 
 ### Analytics
 
 - Shared opportunity backbone is the standard runtime path.
-- Separate stat engines are live for:
-  - points
-  - rebounds
-  - assists
-  - threes
-- Absence-impact plumbing remains intact but default coefficients are zeroed.
-- Evaluation/reporting now includes:
-  - error summaries
-  - decision summaries
-  - absence-impact summaries
-  - calibration curves
-  - threshold analysis
+- Separate stat engines are live for points, rebounds, assists, threes.
+- Absence-impact coefficients are re-enabled at conservative defaults:
+  - `minutes_factor=0.15`, `usage_factor=0.10`, `touches_factor=0.08`, `passes_factor=0.06`
+  - `confidence_floor=0.35`
+- Absence-impact pair-level quality gates tightened:
+  - `sample_confidence >= 0.25`
+  - `source_out_game_count >= 3`
+  - `beneficiary_out_game_count >= 3`
+  - `|impact_score| >= 0.05`
+- A/B backtest comparator added: runs points backtest with coefficients on vs off for controlled comparison.
+- Evaluation/reporting includes error summaries, decision summaries, absence-impact summaries, calibration curves, threshold analysis.
 
 ## Current Modeling State
 
@@ -62,138 +53,82 @@ Window: `2026-01-01` through `2026-03-12`
 | Assists | 9,147 | 1.3510 | 1.7811 | 0.1559 |
 | Threes | 9,147 | 0.9084 | 1.2157 | 0.1428 |
 
-Interpretation:
-- points and rebounds both improved materially this session
-- rebounds bias has been effectively neutralized
-- assists remains the cleanest untouched engine
-- threes still needs archive accumulation before any edge claims are meaningful
-
 ### Recommendation Read
 
-- Points recommendations are now more conservative after calibration review.
-- Rebounds recommendations are also tighter after calibration review.
-- Assists thresholds are unchanged for now.
-- Threes thresholds are unchanged because historical line coverage is still zero.
-
-### Opportunity / Context
-
-- Opportunity remains the shared dependency for every stat engine.
-- Readiness now blocks any signal with `opportunity_confidence < 0.35`.
-- Missing stat-specific feature coverage and thin non-zero sample are now first-class blockers.
-- Official injury archive coverage is now:
-  - overall entry match rate: `93.21%`
-  - named entry match rate: `100.00%`
+- Points and rebounds recommendations are conservative after calibration review.
+- Assists thresholds unchanged.
+- Threes thresholds unchanged (zero historical line coverage).
 
 ### Absence-Impact
 
-- Default absence-impact coefficients remain zero.
+- Conservative coefficients are live (re-enabled 2026-03-19).
 - Signed-delta plumbing is fixed.
-- Source-pool overrides expanded again:
-  - total overrides in DB: `30`
-- Current starter-pool rebuild:
-  - `149` selected sources
-  - `1,426` summaries persisted in the rebuild batch
+- Pair-level quality gates tightened (2026-03-22).
+- A/B backtest comparator available via `build_absence_impact_ab_report()`.
+- Source-pool: 30 overrides, 149 selected sources, 1,426 summaries.
 
 ## Current Phase Progress
 
-### Phase 1: Analytics Architecture
-Status: complete
-
-Completed:
-- shared opportunity backbone
-- separate stat engines
-- transparent breakdowns
-- backtest/reporting structure
-
-### Phase 2: Rotation Data Layer
-Status: complete
-
-### Phase 3: Rotation Backfill And Hardening
+### Phase 1–3: Analytics Architecture, Rotation Data, Rotation Hardening
 Status: complete
 
 ### Phase 4: Opportunity Model Improvement
 Status: in progress
 
-Completed inside Phase 4:
+Completed:
 - official injury report wiring
 - historical pregame context backfill
-- empirical absence-impact layer
-- signed-delta absence-impact fix
+- empirical absence-impact layer with signed deltas
 - source override expansion
+- conservative coefficient re-enable
+- pair-level quality gates
 
-Open inside Phase 4:
-- improve pair quality before re-enabling absence-impact bonuses
+Open:
+- run A/B backtest to validate absence-impact layer
 - improve how matched official injury rows affect player-level opportunity context
 
 ### Phase 5: Pregame Reliability Hardening
 Status: in progress
 
-#### Phase 1 readiness gates
-Status: complete
-
 Completed:
-- blocked / limited / ready status surfaced end-to-end
-- stat-specific readiness checks
-- opportunity-confidence blocker
-- stale archive warning
-- health blocker counts by reason / stat type
-
-#### Phase 2 signal audit trail
-Status: complete
-
-Completed:
-- append-only `signal_audit_trail`
-- audit endpoints
-- audit summary in health
-
-#### Phase 3 calibration
-Status: started
-
-Completed:
-- calibration curve utilities
-- threshold analysis utilities
-- calibration output added to report builders
+- readiness gates (blocked/limited/ready)
+- signal audit trail
+- calibration curve and threshold analysis utilities
 - provisional threshold tightening for points and rebounds
 
-Still needed:
+Open:
 - collect more line coverage before treating calibration as stable
-- revisit assists / threes thresholds once archive density improves
+- revisit assists/threes thresholds once archive density improves
 
 ## Current Next Phase Gate
 
 Before live modeling starts:
 
-1. Let the hardened odds archive accumulate enough multi-snapshot coverage to support real edge validation.
-2. Improve how matched official injury rows change player-level opportunity context; raw named-entry matching is no longer the main bottleneck.
-3. Revisit absence-impact with pair-level suppression / stricter pair sampling.
-4. Re-run calibration once line coverage is materially denser.
+1. Run the A/B backtest to confirm absence-impact helps before tuning further.
+2. Let odds archive accumulate for real edge validation.
+3. Improve how official injury rows change player-level opportunity context.
+4. Re-run calibration once line coverage is denser.
 
-Live modeling should remain blocked until those pregame reliability gates are stronger.
+Live modeling should remain blocked until these pregame reliability gates are stronger.
 
 ## Important Design Decisions
 
 - Shared opportunity backbone, separate stat engines.
 - Backend/model quality over frontend work.
-- Conservative readiness and recommendation thresholds are preferred.
+- Conservative readiness and recommendation thresholds preferred.
 - Audit trail is append-only.
-- Do not trust betting-edge conclusions until line archive coverage is materially larger.
-- Do not start live model implementation yet.
+- Do not trust betting-edge conclusions until line archive coverage is larger.
 
 ## Useful Commands
 
 ### Tests
 ```powershell
-E:\dev\projects\bettingbyte-v2\.venv\Scripts\python.exe -m unittest discover -s E:\dev\projects\bettingbyte-v2\tests -p "test_*.py" -v
+E:\dev\projects\bettingbyte-v2\.venv\Scripts\python.exe -m pytest tests/ -q
 ```
 
 ### Compile checks
 ```powershell
-E:\dev\projects\bettingbyte-v2\.venv\Scripts\python.exe -m compileall E:\dev\projects\bettingbyte-v2\database E:\dev\projects\bettingbyte-v2\ingestion E:\dev\projects\bettingbyte-v2\analytics E:\dev\projects\bettingbyte-v2\tests E:\dev\projects\bettingbyte-v2\api
-```
-
-### Pytest coverage for ingestion / health
-```powershell
-E:\dev\projects\bettingbyte-v2\.venv\Scripts\python.exe -m pytest E:\dev\projects\bettingbyte-v2\tests\test_jobs.py E:\dev\projects\bettingbyte-v2\tests\test_scheduler.py E:\dev\projects\bettingbyte-v2\tests\test_health_service.py -q
+E:\dev\projects\bettingbyte-v2\.venv\Scripts\python.exe -m compileall database ingestion analytics tests api
 ```
 
 ### Migrations

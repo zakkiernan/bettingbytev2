@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclass_replace
 from datetime import date, datetime, timedelta
 from math import sqrt
 from statistics import mean, median
@@ -14,7 +14,7 @@ from analytics.features_rebounds import build_pregame_rebounds_features_from_see
 from analytics.features_threes import build_pregame_threes_features_from_seed
 from analytics.injury_report_loader import build_official_injury_report_index
 from analytics.assists_model import project_pregame_assists
-from analytics.opportunity_model import project_pregame_opportunity
+from analytics.opportunity_model import PregameOpportunityModelConfig, project_pregame_opportunity
 from analytics.pregame_context_loader import build_pregame_context_index, load_pregame_context_snapshot_rows
 from analytics.pregame_model import project_pregame_points
 from analytics.rebounds_model import project_pregame_rebounds
@@ -790,6 +790,7 @@ def backtest_pregame_points(
     limit: int | None = None,
     max_minutes_before_tip: int | None = None,
     min_minutes_before_tip: int | None = None,
+    opportunity_config: PregameOpportunityModelConfig | None = None,
 ) -> PregamePointsBacktestResult:
     with session_scope() as session:
         target_query = session.query(HistoricalGameLog).filter(HistoricalGameLog.points.is_not(None))
@@ -915,8 +916,8 @@ def backtest_pregame_points(
                 continue
 
             features = build_pregame_points_features_from_seed(seed)
-            opportunity_projection = project_pregame_opportunity(features)
-            projection = project_pregame_points(features)
+            opportunity_projection = project_pregame_opportunity(features, config=opportunity_config) if opportunity_config is not None else project_pregame_opportunity(features)
+            projection = project_pregame_points(features, opportunity_config=opportunity_config, opportunity_projection=opportunity_projection)
             if projection.breakdown.expected_minutes < min_expected_minutes:
                 continue
 
@@ -1109,6 +1110,7 @@ def backtest_pregame_opportunity(
     limit: int | None = None,
     max_minutes_before_tip: int | None = None,
     min_minutes_before_tip: int | None = None,
+    opportunity_config: PregameOpportunityModelConfig | None = None,
 ) -> PregameOpportunityBacktestResult:
     with session_scope() as session:
         target_query = session.query(HistoricalGameLog).filter(HistoricalGameLog.minutes.is_not(None))
@@ -1234,7 +1236,7 @@ def backtest_pregame_opportunity(
                 continue
 
             feature = seed.build_opportunity_features()
-            projection = project_pregame_opportunity(feature)
+            projection = project_pregame_opportunity(feature, config=opportunity_config) if opportunity_config is not None else project_pregame_opportunity(feature)
             if projection.breakdown.expected_minutes < min_expected_minutes:
                 continue
 
@@ -1937,4 +1939,206 @@ def analyze_recommendation_thresholds(
                 }
             )
     return analyses
+
+
+def _zeroed_absence_impact_config() -> PregameOpportunityModelConfig:
+    return dataclass_replace(
+        PregameOpportunityModelConfig(),
+        absence_impact_minutes_factor=0.0,
+        absence_impact_usage_factor=0.0,
+        absence_impact_touches_factor=0.0,
+        absence_impact_passes_factor=0.0,
+    )
+
+
+@dataclass(slots=True)
+class AbsenceImpactABRow:
+    game_id: str
+    game_date: datetime
+    player_id: str
+    player_name: str
+    team_abbreviation: str
+    opponent_abbreviation: str
+    actual_points: float
+    projected_with: float
+    projected_without: float
+    error_with: float
+    error_without: float
+    abs_error_with: float
+    abs_error_without: float
+    delta_abs_error: float
+    absence_impact_minutes_bonus: float
+    absence_impact_usage_bonus: float
+    absence_impact_sample_confidence: float | None
+    absence_impact_source_count: float | None
+
+
+@dataclass(slots=True)
+class AbsenceImpactABSummary:
+    total_rows: int
+    affected_rows: int
+    affected_pct: float
+    with_mae: float
+    without_mae: float
+    mae_delta: float
+    with_bias: float
+    without_bias: float
+    bias_delta: float
+    with_rmse: float
+    without_rmse: float
+    rmse_delta: float
+    improved_count: int
+    worsened_count: int
+    unchanged_count: int
+    improved_pct: float
+    worsened_pct: float
+    avg_improvement: float
+    avg_worsening: float
+    confidence_buckets: list[dict[str, Any]]
+    top_improvements: list[dict[str, Any]]
+    top_worsenings: list[dict[str, Any]]
+
+
+def compare_absence_impact_ab(
+    *,
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
+    min_history: int = 8,
+    limit: int | None = None,
+) -> AbsenceImpactABSummary:
+    result_with = backtest_pregame_points(
+        start_date=start_date,
+        end_date=end_date,
+        min_history=min_history,
+        limit=limit,
+    )
+    zeroed_config = _zeroed_absence_impact_config()
+    result_without = backtest_pregame_points(
+        start_date=start_date,
+        end_date=end_date,
+        min_history=min_history,
+        limit=limit,
+        opportunity_config=zeroed_config,
+    )
+
+    with_by_key = {(r.game_id, r.player_id): r for r in result_with.rows}
+    without_by_key = {(r.game_id, r.player_id): r for r in result_without.rows}
+
+    ab_rows: list[AbsenceImpactABRow] = []
+    for key, row_with in with_by_key.items():
+        if not _has_absence_impact_bonus(row_with):
+            continue
+        row_without = without_by_key.get(key)
+        if row_without is None:
+            continue
+        delta = abs(row_with.error) - abs(row_without.error)
+        ab_rows.append(
+            AbsenceImpactABRow(
+                game_id=row_with.game_id,
+                game_date=row_with.game_date,
+                player_id=row_with.player_id,
+                player_name=row_with.player_name,
+                team_abbreviation=row_with.team_abbreviation,
+                opponent_abbreviation=row_with.opponent_abbreviation,
+                actual_points=row_with.actual_points,
+                projected_with=row_with.projected_points,
+                projected_without=row_without.projected_points,
+                error_with=row_with.error,
+                error_without=row_without.error,
+                abs_error_with=row_with.abs_error,
+                abs_error_without=row_without.abs_error,
+                delta_abs_error=_round(delta),
+                absence_impact_minutes_bonus=row_with.absence_impact_minutes_bonus,
+                absence_impact_usage_bonus=row_with.absence_impact_usage_bonus,
+                absence_impact_sample_confidence=row_with.absence_impact_sample_confidence,
+                absence_impact_source_count=row_with.absence_impact_source_count,
+            )
+        )
+
+    if not ab_rows:
+        return AbsenceImpactABSummary(
+            total_rows=len(result_with.rows),
+            affected_rows=0,
+            affected_pct=0.0,
+            with_mae=0.0, without_mae=0.0, mae_delta=0.0,
+            with_bias=0.0, without_bias=0.0, bias_delta=0.0,
+            with_rmse=0.0, without_rmse=0.0, rmse_delta=0.0,
+            improved_count=0, worsened_count=0, unchanged_count=0,
+            improved_pct=0.0, worsened_pct=0.0,
+            avg_improvement=0.0, avg_worsening=0.0,
+            confidence_buckets=[], top_improvements=[], top_worsenings=[],
+        )
+
+    with_mae = _round(mean(r.abs_error_with for r in ab_rows))
+    without_mae = _round(mean(r.abs_error_without for r in ab_rows))
+    with_bias = _round(mean(r.error_with for r in ab_rows))
+    without_bias = _round(mean(r.error_without for r in ab_rows))
+    with_rmse = _round(sqrt(mean(r.error_with ** 2 for r in ab_rows)))
+    without_rmse = _round(sqrt(mean(r.error_without ** 2 for r in ab_rows)))
+
+    improved = [r for r in ab_rows if r.delta_abs_error < -0.01]
+    worsened = [r for r in ab_rows if r.delta_abs_error > 0.01]
+    unchanged = [r for r in ab_rows if abs(r.delta_abs_error) <= 0.01]
+
+    confidence_labels = ("0.35-0.49", "0.50-0.64", "0.65+", "unknown")
+    buckets: list[dict[str, Any]] = []
+    for label in confidence_labels:
+        bucket = [r for r in ab_rows if _absence_impact_confidence_label(r.absence_impact_sample_confidence) == label]
+        if not bucket:
+            buckets.append({"label": label, "count": 0, "with_mae": 0.0, "without_mae": 0.0, "mae_delta": 0.0})
+            continue
+        b_with_mae = _round(mean(r.abs_error_with for r in bucket))
+        b_without_mae = _round(mean(r.abs_error_without for r in bucket))
+        buckets.append({
+            "label": label,
+            "count": len(bucket),
+            "with_mae": b_with_mae,
+            "without_mae": b_without_mae,
+            "mae_delta": _round(b_with_mae - b_without_mae),
+        })
+
+    def _row_dict(r: AbsenceImpactABRow) -> dict[str, Any]:
+        return {
+            "game_id": r.game_id,
+            "game_date": r.game_date.isoformat(),
+            "player_name": r.player_name,
+            "team_abbreviation": r.team_abbreviation,
+            "actual_points": r.actual_points,
+            "projected_with": r.projected_with,
+            "projected_without": r.projected_without,
+            "abs_error_with": r.abs_error_with,
+            "abs_error_without": r.abs_error_without,
+            "delta_abs_error": r.delta_abs_error,
+            "absence_impact_minutes_bonus": r.absence_impact_minutes_bonus,
+            "absence_impact_usage_bonus": r.absence_impact_usage_bonus,
+            "absence_impact_sample_confidence": r.absence_impact_sample_confidence,
+        }
+
+    top_improvements = sorted(ab_rows, key=lambda r: r.delta_abs_error)[:10]
+    top_worsenings = sorted(ab_rows, key=lambda r: r.delta_abs_error, reverse=True)[:10]
+
+    return AbsenceImpactABSummary(
+        total_rows=len(result_with.rows),
+        affected_rows=len(ab_rows),
+        affected_pct=_round(len(ab_rows) / len(result_with.rows)) if result_with.rows else 0.0,
+        with_mae=with_mae,
+        without_mae=without_mae,
+        mae_delta=_round(with_mae - without_mae),
+        with_bias=with_bias,
+        without_bias=without_bias,
+        bias_delta=_round(with_bias - without_bias),
+        with_rmse=with_rmse,
+        without_rmse=without_rmse,
+        rmse_delta=_round(with_rmse - without_rmse),
+        improved_count=len(improved),
+        worsened_count=len(worsened),
+        unchanged_count=len(unchanged),
+        improved_pct=_round(len(improved) / len(ab_rows)),
+        worsened_pct=_round(len(worsened) / len(ab_rows)),
+        avg_improvement=_round(mean(r.delta_abs_error for r in improved)) if improved else 0.0,
+        avg_worsening=_round(mean(r.delta_abs_error for r in worsened)) if worsened else 0.0,
+        confidence_buckets=buckets,
+        top_improvements=[_row_dict(r) for r in top_improvements],
+        top_worsenings=[_row_dict(r) for r in top_worsenings],
+    )
 

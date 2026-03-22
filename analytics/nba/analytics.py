@@ -15,6 +15,7 @@ from analytics.absence_impact import (
 )
 from analytics.diagnostics import analyze_pregame_opportunity_misses, analyze_pregame_points_misses
 from analytics.evaluation import (
+    AbsenceImpactABSummary,
     PregameAssistsBacktestResult,
     PregameOpportunityBacktestResult,
     PregamePointsBacktestResult,
@@ -26,6 +27,7 @@ from analytics.evaluation import (
     backtest_pregame_points,
     backtest_pregame_rebounds,
     backtest_pregame_threes,
+    compare_absence_impact_ab,
     compute_calibration_curve,
     summarize_opportunity_absence_impact,
     summarize_points_absence_impact,
@@ -179,6 +181,10 @@ def build_stats_signal_evaluation_report(*, start_date: datetime | None = None, 
         "summary": result.summary,
         "row_count": len(result.rows),
     }
+
+
+def build_absence_impact_ab_report(*, start_date: datetime | None = None, end_date: datetime | None = None, min_history: int = 8, limit: int | None = None) -> AbsenceImpactABSummary:
+    return compare_absence_impact_ab(start_date=start_date, end_date=end_date, min_history=min_history, limit=limit)
 
 
 def build_absence_impact_report(*, source_player_id: str, team_abbreviation: str, start_date: datetime | None = None, end_date: datetime | None = None, min_active_games: int = 5, min_out_games: int = 2) -> AbsenceImpactBuildResult:

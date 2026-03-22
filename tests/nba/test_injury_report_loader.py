@@ -340,6 +340,7 @@ class OfficialInjuryOpportunityFeatureTests(unittest.TestCase):
                 impact_score=2.4,
                 sample_confidence=0.6,
                 source_out_game_count=4,
+                beneficiary_out_game_count=4,
                 updated_at=datetime(2026, 3, 10, 12, 0, 0),
                 created_at=datetime(2026, 3, 10, 12, 0, 0),
             )
@@ -390,6 +391,7 @@ class OfficialInjuryOpportunityFeatureTests(unittest.TestCase):
                 impact_score=1.8,
                 sample_confidence=0.6,
                 source_out_game_count=4,
+                beneficiary_out_game_count=4,
                 updated_at=datetime(2026, 3, 10, 12, 0, 0),
                 created_at=datetime(2026, 3, 10, 12, 0, 0),
             )
