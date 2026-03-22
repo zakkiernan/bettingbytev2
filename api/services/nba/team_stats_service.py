@@ -10,6 +10,10 @@ from api.schemas.nba.team_stats import (
     TeamProfileResponse,
 )
 from api.services.nba.stats_contracts import resolve_nba_season
+from api.services.nba.team_defense_utils import (
+    completed_team_games,
+    normalize_opponent_points_per_game,
+)
 from database.models import (
     LineupStats,
     Team,
@@ -80,13 +84,17 @@ def get_team_profile(
 
     defense = None
     if defense_row:
+        completed_games = completed_team_games(db, team_id, season)
         defense = TeamDefenseProfile(
             team_id=team_id,
             team_name=defense_row.team_name,
             season=season,
             defensive_rating=defense_row.defensive_rating,
             pace=defense_row.pace,
-            opponent_points_per_game=defense_row.opponent_points_per_game,
+            opponent_points_per_game=normalize_opponent_points_per_game(
+                defense_row.opponent_points_per_game,
+                completed_games,
+            ),
             opponent_field_goal_percentage=defense_row.opponent_field_goal_percentage,
             opponent_three_point_percentage=defense_row.opponent_three_point_percentage,
         )

@@ -6,9 +6,33 @@ interface Props {
   away: TeamGameContext;
 }
 
-function DefStat({ label, home, away, lower }: { label: string; home?: number; away?: number; lower?: boolean }) {
-  const homeStr = home != null ? home.toFixed(1) : "—";
-  const awayStr = away != null ? away.toFixed(1) : "—";
+function formatStat(value: number | undefined, mode: "number" | "percent"): string {
+  if (value == null) {
+    return "--";
+  }
+
+  if (mode === "percent") {
+    return `${(value * 100).toFixed(1)}%`;
+  }
+
+  return value.toFixed(1);
+}
+
+function DefStat({
+  label,
+  home,
+  away,
+  lower,
+  mode = "number",
+}: {
+  label: string;
+  home?: number;
+  away?: number;
+  lower?: boolean;
+  mode?: "number" | "percent";
+}) {
+  const homeStr = formatStat(home, mode);
+  const awayStr = formatStat(away, mode);
 
   let homeColor = "";
   let awayColor = "";
@@ -54,8 +78,20 @@ export function TeamDefenseComparison({ home, away }: Props) {
           <DefStat label="Def Rtg" home={hd?.defensive_rating} away={ad?.defensive_rating} lower />
           <DefStat label="Pace" home={hd?.pace} away={ad?.pace} />
           <DefStat label="Opp PPG" home={hd?.opponent_points_per_game} away={ad?.opponent_points_per_game} lower />
-          <DefStat label="Opp FG%" home={hd?.opponent_field_goal_percentage} away={ad?.opponent_field_goal_percentage} lower />
-          <DefStat label="Opp 3P%" home={hd?.opponent_three_point_percentage} away={ad?.opponent_three_point_percentage} lower />
+          <DefStat
+            label="Opp FG%"
+            home={hd?.opponent_field_goal_percentage}
+            away={ad?.opponent_field_goal_percentage}
+            lower
+            mode="percent"
+          />
+          <DefStat
+            label="Opp 3P%"
+            home={hd?.opponent_three_point_percentage}
+            away={ad?.opponent_three_point_percentage}
+            lower
+            mode="percent"
+          />
         </tbody>
       </table>
     </Card>

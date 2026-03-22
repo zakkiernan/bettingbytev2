@@ -13,6 +13,10 @@ from api.schemas.game_context import (
     TeamGameContext,
 )
 from api.services.nba.stats_contracts import resolve_nba_season
+from api.services.nba.team_defense_utils import (
+    completed_team_games,
+    normalize_opponent_points_per_game,
+)
 from database.models import (
     Game,
     OfficialInjuryReportEntry,
@@ -114,6 +118,7 @@ def _build_team_context(
 
     # --- Team defense ---
     defense: TeamDefenseSnapshot | None = None
+    team_obj: Team | None = None
     def_row = db.execute(
         select(TeamDefensiveStat).where(
             TeamDefensiveStat.team_name == team_name,
@@ -135,10 +140,15 @@ def _build_team_context(
             ).scalars().first()
 
     if def_row:
+        defense_team_id = def_row.team_id if def_row.team_id else (team_obj.team_id if team_obj else None)
+        completed_games = completed_team_games(db, defense_team_id, season)
         defense = TeamDefenseSnapshot(
             defensive_rating=def_row.defensive_rating,
             pace=def_row.pace,
-            opponent_points_per_game=def_row.opponent_points_per_game,
+            opponent_points_per_game=normalize_opponent_points_per_game(
+                def_row.opponent_points_per_game,
+                completed_games,
+            ),
             opponent_field_goal_percentage=def_row.opponent_field_goal_percentage,
             opponent_three_point_percentage=def_row.opponent_three_point_percentage,
         )
