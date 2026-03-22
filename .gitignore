@@ -4,11 +4,17 @@ venv/
 __pycache__/
 *.pyc
 *.db
+*.db-journal
+*.db-shm
+*.db-wal
 logs/
 pregame_context_feature_pack/data/
 *.log
+.env.local
 frontend/node_modules/
 frontend/.next/
 frontend/tsconfig.tsbuildinfo
+build/
+dist/
 .tmp_*.py
 tmpls1it4ig/

@@ -60,7 +60,7 @@ class Game(Base):
 
     game_id: Mapped[str] = mapped_column(String, primary_key=True)
     season: Mapped[str | None] = mapped_column(String, nullable=True)
-    game_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    game_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     home_team_id: Mapped[str | None] = mapped_column(ForeignKey("teams.team_id"), nullable=True)
     away_team_id: Mapped[str | None] = mapped_column(ForeignKey("teams.team_id"), nullable=True)
     home_team_abbreviation: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -106,6 +106,7 @@ class PlayerPropSnapshot(Base):
             name="uq_player_prop_snapshot_market_phase",
         ),
         Index("ix_player_prop_snapshot_lookup", "game_id", "player_id", "stat_type", "is_live", "snapshot_phase"),
+        Index("ix_player_prop_snapshot_stat_live_capture", "stat_type", "is_live", "captured_at"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -114,7 +115,7 @@ class PlayerPropSnapshot(Base):
     player_name: Mapped[str] = mapped_column(String, nullable=False)
     team: Mapped[str | None] = mapped_column(String, nullable=True)
     opponent: Mapped[str | None] = mapped_column(String, nullable=True)
-    stat_type: Mapped[str] = mapped_column(String, nullable=False)
+    stat_type: Mapped[str] = mapped_column(String, nullable=False, index=True)
     line: Mapped[float] = mapped_column(Float, nullable=False)
     over_odds: Mapped[int] = mapped_column(Integer, nullable=False)
     under_odds: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -127,18 +128,19 @@ class OddsSnapshot(Base):
     __tablename__ = "odds_snapshots"
     __table_args__ = (
         Index("ix_odds_snapshot_lookup", "game_id", "player_id", "stat_type", "captured_at"),
+        Index("ix_odds_snapshot_phase_stat_capture", "market_phase", "stat_type", "captured_at"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     game_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     player_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     player_name: Mapped[str] = mapped_column(String, nullable=False)
-    stat_type: Mapped[str] = mapped_column(String, nullable=False)
+    stat_type: Mapped[str] = mapped_column(String, nullable=False, index=True)
     line: Mapped[float] = mapped_column(Float, nullable=False)
     over_odds: Mapped[int] = mapped_column(Integer, nullable=False)
     under_odds: Mapped[int] = mapped_column(Integer, nullable=False)
     source: Mapped[str] = mapped_column(String, default="fanduel", nullable=False)
-    market_phase: Mapped[str] = mapped_column(String, default="pregame", nullable=False)
+    market_phase: Mapped[str] = mapped_column(String, default="pregame", nullable=False, index=True)
     captured_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
 
@@ -1129,7 +1131,7 @@ class StatsSignalSnapshot(Base):
     player_name: Mapped[str] = mapped_column(String, nullable=False)
     team_abbreviation: Mapped[str | None] = mapped_column(String, nullable=True)
     opponent_abbreviation: Mapped[str | None] = mapped_column(String, nullable=True)
-    stat_type: Mapped[str] = mapped_column(String, nullable=False)
+    stat_type: Mapped[str] = mapped_column(String, nullable=False, index=True)
     snapshot_phase: Mapped[str] = mapped_column(String, nullable=False, default="current")
     line: Mapped[float] = mapped_column(Float, nullable=False)
     over_odds: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -1168,7 +1170,7 @@ class SignalAuditTrail(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     game_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     player_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    stat_type: Mapped[str] = mapped_column(String, nullable=False)
+    stat_type: Mapped[str] = mapped_column(String, nullable=False, index=True)
     snapshot_phase: Mapped[str] = mapped_column(String, nullable=False, default="current")
     line: Mapped[float] = mapped_column(Float, nullable=False)
     projected_value: Mapped[float] = mapped_column(Float, nullable=False)
