@@ -50,6 +50,7 @@ class PregameAssistsModelConfig:
     rest_bonus_per_day: float = 0.05
     rest_bonus_max_days: int = 2
     context_clamp: float = 0.8
+    vacancy_bonus_dampener: float = 0.65
     opportunity_confidence_weight: float = 0.28
     opportunity_score_weight: float = 0.22
     sample_strength_weight: float = 0.14
@@ -171,8 +172,10 @@ def project_pregame_assists(
         config.apm_ceiling,
     )
 
-    expected_minutes = opportunity.expected_minutes
-    expected_usage_pct = opportunity.expected_usage_pct
+    vacancy_minutes_bonus = _value_or_zero(opportunity.vacated_minutes_bonus) + _value_or_zero(opportunity.role_replacement_minutes_bonus)
+    expected_minutes = opportunity.expected_minutes - vacancy_minutes_bonus * (1.0 - config.vacancy_bonus_dampener)
+    vacancy_usage_bonus = _value_or_zero(opportunity.vacated_usage_bonus) + _value_or_zero(opportunity.role_replacement_usage_bonus)
+    expected_usage_pct = opportunity.expected_usage_pct - vacancy_usage_bonus * (1.0 - config.vacancy_bonus_dampener)
     base_playmaking = max(0.0, expected_minutes * assists_per_minute)
 
     minutes_adjustment = 0.0

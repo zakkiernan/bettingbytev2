@@ -32,21 +32,22 @@ class PregameThreesModelConfig:
     tpm_regression_factor: float = 0.90
     tpm_floor: float = 0.01
     tpm_ceiling: float = 0.30
-    recent_form_last5_factor: float = 0.14
-    recent_form_last10_factor: float = 0.07
+    recent_form_last5_factor: float = 0.10
+    recent_form_last10_factor: float = 0.04
     recent_form_clamp: float = 1.2
-    three_point_rate_factor: float = 4.5
-    volume_trend_factor: float = 0.18
+    three_point_rate_factor: float = 3.9
+    volume_trend_factor: float = 0.15
     volume_clamp: float = 1.6
-    opponent_3pt_defense_factor: float = 6.0
-    pace_factor: float = 0.07
+    opponent_3pt_defense_factor: float = 5.5
+    pace_factor: float = 0.06
     opponent_clamp: float = 0.8
     pace_clamp: float = 0.8
-    home_bonus: float = 0.10
+    home_bonus: float = 0.03
     back_to_back_penalty: float = 0.25
     rest_bonus_per_day: float = 0.05
     rest_bonus_max_days: int = 2
     context_clamp: float = 0.7
+    vacancy_bonus_dampener: float = 0.72
     opportunity_confidence_weight: float = 0.28
     opportunity_score_weight: float = 0.22
     sample_strength_weight: float = 0.14
@@ -168,8 +169,10 @@ def project_pregame_threes(
         config.tpm_ceiling,
     )
 
-    expected_minutes = opportunity.expected_minutes
-    expected_usage_pct = opportunity.expected_usage_pct
+    vacancy_minutes_bonus = _value_or_zero(opportunity.vacated_minutes_bonus) + _value_or_zero(opportunity.role_replacement_minutes_bonus)
+    expected_minutes = opportunity.expected_minutes - vacancy_minutes_bonus * (1.0 - config.vacancy_bonus_dampener)
+    vacancy_usage_bonus = _value_or_zero(opportunity.vacated_usage_bonus) + _value_or_zero(opportunity.role_replacement_usage_bonus)
+    expected_usage_pct = opportunity.expected_usage_pct - vacancy_usage_bonus * (1.0 - config.vacancy_bonus_dampener)
     base_shooting = max(0.0, expected_minutes * threes_per_minute)
 
     minutes_adjustment = 0.0

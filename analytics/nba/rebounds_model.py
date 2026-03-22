@@ -28,12 +28,12 @@ class PregameReboundsModelConfig:
         (0.30, "last10_rebounds_avg", "last10_minutes_avg"),
         (0.20, "last5_rebounds_avg", "last5_minutes_avg"),
     )
-    rpm_regression_target: float = 0.16
+    rpm_regression_target: float = 0.18
     rpm_regression_factor: float = 0.90
     rpm_floor: float = 0.08
     rpm_ceiling: float = 0.55
-    recent_form_last5_factor: float = 0.16
-    recent_form_last10_factor: float = 0.08
+    recent_form_last5_factor: float = 0.10
+    recent_form_last10_factor: float = 0.04
     recent_form_clamp: float = 1.8
     reb_pct_delta_factor: float = 4.0
     oreb_share_factor: float = 0.0
@@ -42,10 +42,11 @@ class PregameReboundsModelConfig:
     opponent_clamp: float = 1.0
     pace_clamp: float = 1.0
     home_bonus: float = 0.0
-    back_to_back_penalty: float = 0.60
-    rest_bonus_per_day: float = 0.06
+    back_to_back_penalty: float = 0.30
+    rest_bonus_per_day: float = 0.09
     rest_bonus_max_days: int = 2
     context_clamp: float = 0.8
+    vacancy_bonus_dampener: float = 0.82
     missing_frontcourt_rotation_bonus: float = 0.0
     opportunity_confidence_weight: float = 0.28
     opportunity_score_weight: float = 0.24
@@ -168,8 +169,10 @@ def project_pregame_rebounds(
         config.rpm_ceiling,
     )
 
-    expected_minutes = opportunity.expected_minutes
-    expected_usage_pct = opportunity.expected_usage_pct
+    vacancy_minutes_bonus = _value_or_zero(opportunity.vacated_minutes_bonus) + _value_or_zero(opportunity.role_replacement_minutes_bonus)
+    expected_minutes = opportunity.expected_minutes - vacancy_minutes_bonus * (1.0 - config.vacancy_bonus_dampener)
+    vacancy_usage_bonus = _value_or_zero(opportunity.vacated_usage_bonus) + _value_or_zero(opportunity.role_replacement_usage_bonus)
+    expected_usage_pct = opportunity.expected_usage_pct - vacancy_usage_bonus * (1.0 - config.vacancy_bonus_dampener)
     base_rebounding = max(0.0, expected_minutes * rebounds_per_minute)
 
     minutes_adjustment = 0.0
