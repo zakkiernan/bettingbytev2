@@ -48,16 +48,20 @@ def _team_brief(team: Team | None) -> TeamBrief:
 # ---------------------------------------------------------------------------
 
 
-def get_games_today(db: Session) -> list[GameDetailResponse]:
+def get_games_today(db: Session, *, limit: int = 50, offset: int = 0) -> list[GameDetailResponse]:
     """Return all games scheduled for today with prop/edge counts."""
     start, end = _today_window()
 
     games = (
         db.execute(
-            select(Game).where(
+            select(Game)
+            .where(
                 Game.game_date >= start,
                 Game.game_date < end,
             )
+            .order_by(Game.game_time_utc.asc(), Game.game_id.asc())
+            .offset(offset)
+            .limit(limit)
         )
         .scalars()
         .all()

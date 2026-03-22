@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
+from api.rate_limit import auth_rate_limit
 from api.schemas import AuthResponse, UserResponse
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -19,15 +20,18 @@ MOCK_USER = UserResponse(
 
 
 @router.post("/register", response_model=AuthResponse)
-def register() -> AuthResponse:
+@auth_rate_limit
+def register(request: Request) -> AuthResponse:
     return AuthResponse(user=MOCK_USER, token="mock-register-token")
 
 
 @router.post("/login", response_model=AuthResponse)
-def login() -> AuthResponse:
+@auth_rate_limit
+def login(request: Request) -> AuthResponse:
     return AuthResponse(user=MOCK_USER, token="mock-login-token")
 
 
 @router.get("/me", response_model=UserResponse)
-def me() -> UserResponse:
+@auth_rate_limit
+def me(request: Request) -> UserResponse:
     return MOCK_USER

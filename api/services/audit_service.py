@@ -44,7 +44,14 @@ def _build_audit_entry(row: SignalAuditTrail) -> SignalAuditEntry:
     )
 
 
-def get_player_game_audit_rows(db: Session, *, player_id: str, game_id: str) -> list[SignalAuditEntry]:
+def get_player_game_audit_rows(
+    db: Session,
+    *,
+    player_id: str,
+    game_id: str,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[SignalAuditEntry]:
     rows = (
         db.execute(
             select(SignalAuditTrail)
@@ -53,6 +60,8 @@ def get_player_game_audit_rows(db: Session, *, player_id: str, game_id: str) -> 
                 SignalAuditTrail.game_id == game_id,
             )
             .order_by(SignalAuditTrail.captured_at.asc(), SignalAuditTrail.id.asc())
+            .offset(offset)
+            .limit(limit)
         )
         .scalars()
         .all()
@@ -60,7 +69,13 @@ def get_player_game_audit_rows(db: Session, *, player_id: str, game_id: str) -> 
     return [_build_audit_entry(row) for row in rows]
 
 
-def get_game_audit_rows(db: Session, *, game_id: str) -> list[SignalAuditEntry]:
+def get_game_audit_rows(
+    db: Session,
+    *,
+    game_id: str,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[SignalAuditEntry]:
     rows = (
         db.execute(
             select(SignalAuditTrail)
@@ -71,6 +86,8 @@ def get_game_audit_rows(db: Session, *, game_id: str) -> list[SignalAuditEntry]:
                 SignalAuditTrail.stat_type.asc(),
                 SignalAuditTrail.id.asc(),
             )
+            .offset(offset)
+            .limit(limit)
         )
         .scalars()
         .all()
@@ -78,11 +95,12 @@ def get_game_audit_rows(db: Session, *, game_id: str) -> list[SignalAuditEntry]:
     return [_build_audit_entry(row) for row in rows]
 
 
-def get_recent_audit_rows(db: Session, *, limit: int = 50) -> list[SignalAuditEntry]:
+def get_recent_audit_rows(db: Session, *, limit: int = 50, offset: int = 0) -> list[SignalAuditEntry]:
     rows = (
         db.execute(
             select(SignalAuditTrail)
             .order_by(SignalAuditTrail.captured_at.desc(), SignalAuditTrail.id.desc())
+            .offset(offset)
             .limit(limit)
         )
         .scalars()

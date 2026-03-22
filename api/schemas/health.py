@@ -85,3 +85,9 @@ class IngestionHealthResponse(APIModel):
     pregame_context: PregameContextHealth
     signal_run: SignalRunHealth
     alerts: list[HealthAlert] = Field(default_factory=list)
+
+
+class SystemHealthResponse(APIModel):
+    status: Literal["ok", "degraded"]
+    db: Literal["connected", "disconnected"]
+    version: str

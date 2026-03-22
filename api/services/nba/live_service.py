@@ -66,7 +66,11 @@ def _float_or_none(value: object) -> float | None:
         return None
 
 
-def _latest_game_snapshots(db: Session, *, game_id: str | None = None) -> list[LiveGameSnapshot]:
+def _latest_game_snapshots(
+    db: Session,
+    *,
+    game_id: str | None = None,
+) -> list[LiveGameSnapshot]:
     latest_by_game = (
         select(
             LiveGameSnapshot.game_id.label("game_id"),
@@ -302,7 +306,7 @@ def _build_game_response(
     )
 
 
-def get_active_live_games(db: Session) -> list[LiveGameSummary]:
+def get_active_live_games(db: Session, *, limit: int = 50, offset: int = 0) -> list[LiveGameSummary]:
     game_snapshots = _latest_game_snapshots(db)
     if not game_snapshots:
         return []
@@ -347,7 +351,7 @@ def get_active_live_games(db: Session) -> list[LiveGameSummary]:
         )
 
     summaries.sort(key=lambda row: row.updated_at or row.game_id, reverse=True)
-    return summaries
+    return summaries[offset : offset + limit]
 
 
 def get_live_game(db: Session, game_id: str) -> LiveGameResponse | None:

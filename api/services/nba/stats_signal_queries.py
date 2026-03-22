@@ -144,6 +144,8 @@ def get_prop_board_response(
     stat_type: str | None = None,
     recommended_only: bool = False,
     min_confidence: float | None = None,
+    limit: int = 50,
+    offset: int = 0,
 ) -> PropBoardResponse:
     snapshots, scoped_game_ids = _load_snapshots_for_today(db, game_id=game_id)
     if not snapshots:
@@ -174,15 +176,20 @@ def get_prop_board_response(
             -abs(row.edge_over or 0.0),
         )
     )
+    total_count = len(rows)
+    paged_rows = rows[offset : offset + limit]
     updated_at = max((snapshot.captured_at for snapshot in snapshots), default=None)
     total_game_count = len({snapshot.game_id for snapshot in snapshots})
     return PropBoardResponse(
-        props=rows,
+        props=paged_rows,
         meta=PropBoardMeta(
-            total_count=len(rows),
+            total_count=total_count,
             game_count=total_game_count,
             updated_at=updated_at,
             stat_types_available=available_stat_types,
+            limit=limit,
+            offset=offset,
+            returned_count=len(paged_rows),
         ),
     )
 
@@ -222,8 +229,8 @@ def get_prop_counts_by_game(db: Session, game_ids: list[str]) -> dict[str, tuple
     return counts
 
 
-def get_edges_today_response(db: Session) -> list[EdgeResponse]:
-    board = get_prop_board_response(db, recommended_only=True)
+def get_edges_today_response(db: Session, *, limit: int = 50, offset: int = 0) -> list[EdgeResponse]:
+    board = get_prop_board_response(db, recommended_only=True, limit=limit, offset=offset)
     game_ids = list({row.game_id for row in board.props})
     games_by_id = {
         game.game_id: game

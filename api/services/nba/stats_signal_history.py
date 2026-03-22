@@ -96,6 +96,7 @@ def get_player_signal_history(
     player_id: str,
     stat_type: str = POINTS_STAT_TYPE,
     limit: int = 20,
+    offset: int = 0,
 ) -> list[SignalHistoryEntry]:
     latest_snapshot_subquery = (
         select(
@@ -121,6 +122,7 @@ def get_player_signal_history(
         )
         .outerjoin(Game, Game.game_id == StatsSignalSnapshot.game_id)
         .order_by(StatsSignalSnapshot.created_at.desc())
+        .offset(offset)
         .limit(limit)
     ).all()
 

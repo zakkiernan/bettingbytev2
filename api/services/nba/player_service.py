@@ -137,6 +137,7 @@ def get_player_game_log(
     db: Session,
     player_id: str,
     limit: int = 10,
+    offset: int = 0,
 ) -> list[GameLogEntry]:
     """Return the most recent game log entries for a player."""
     rows = (
@@ -144,6 +145,7 @@ def get_player_game_log(
             select(HistoricalGameLog)
             .where(HistoricalGameLog.player_id == player_id)
             .order_by(HistoricalGameLog.game_date.desc())
+            .offset(offset)
             .limit(limit)
         )
         .scalars()
@@ -178,6 +180,7 @@ def get_player_trends(
     player_id: str,
     stat_type: str = "points",
     limit: int = 20,
+    offset: int = 0,
 ) -> list[TrendPoint]:
     """Return per-game stat values with the line at time of play (if available).
 
@@ -189,6 +192,7 @@ def get_player_trends(
             select(HistoricalGameLog)
             .where(HistoricalGameLog.player_id == player_id)
             .order_by(HistoricalGameLog.game_date.desc())
+            .offset(offset)
             .limit(limit)
         )
         .scalars()
@@ -232,10 +236,12 @@ def get_player_signal_history(
     player_id: str,
     stat_type: str = "points",
     limit: int = 20,
+    offset: int = 0,
 ) -> list[SignalHistoryEntry]:
     return stats_signal_service.get_player_signal_history(
         db,
         player_id=player_id,
         stat_type=stat_type,
         limit=limit,
+        offset=offset,
     )

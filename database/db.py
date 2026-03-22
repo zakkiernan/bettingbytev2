@@ -1,29 +1,15 @@
 from __future__ import annotations
 
-import os
 from contextlib import contextmanager
-from pathlib import Path
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SQLITE_PATH = PROJECT_ROOT / "bettingbyte.db"
-DEFAULT_DATABASE_URL = f"sqlite:///{DEFAULT_SQLITE_PATH.as_posix()}"
+from config import get_settings, load_environment, resolve_database_url
 
+load_environment()
 
-def resolve_database_url(raw_url: str | None = None) -> str:
-    if not raw_url:
-        return DEFAULT_DATABASE_URL
-
-    if raw_url.startswith("sqlite:///./"):
-        relative_path = raw_url.removeprefix("sqlite:///./")
-        return f"sqlite:///{(PROJECT_ROOT / relative_path).as_posix()}"
-
-    return raw_url
-
-
-DATABASE_URL = resolve_database_url(os.getenv("DATABASE_URL"))
+DATABASE_URL = get_settings().database_url
 
 engine_kwargs: dict[str, object] = {}
 if DATABASE_URL.startswith("sqlite"):
@@ -40,7 +26,7 @@ engine = create_engine(
 
 # Enable WAL mode for SQLite so readers don't block on writers (scheduler).
 if DATABASE_URL.startswith("sqlite"):
-    from sqlalchemy import event, text
+    from sqlalchemy import event
 
     @event.listens_for(engine, "connect")
     def _set_sqlite_wal(dbapi_conn, connection_record):

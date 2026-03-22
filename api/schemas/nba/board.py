@@ -51,6 +51,9 @@ class PropBoardMeta(APIModel):
     game_count: int = 0
     updated_at: datetime | None = None
     stat_types_available: list[str] = Field(default_factory=lambda: ["points"])
+    limit: int = 50
+    offset: int = 0
+    returned_count: int = 0
 
 
 class PropBoardResponse(APIModel):

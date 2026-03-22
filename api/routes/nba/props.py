@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from api.request_params import OptionalGameIdQuery, OptionalStatTypeQuery
 from api.schemas.board import PropBoardResponse
 from api.schemas.detail import PropDetailResponse
 from api.schemas.line_movement import LineMovementResponse
@@ -14,10 +15,12 @@ router = APIRouter(prefix="/props", tags=["props"])
 
 @router.get("/board", response_model=PropBoardResponse)
 def get_prop_board(
-    game_id: str | None = Query(default=None, description="Filter to a single game"),
-    stat_type: str | None = Query(default=None, description="Filter to a specific stat type"),
+    game_id: OptionalGameIdQuery = None,
+    stat_type: OptionalStatTypeQuery = None,
     recommended_only: bool = Query(default=False, description="Only return signals with a recommendation"),
     min_confidence: float | None = Query(default=None, ge=0.0, le=1.0, description="Minimum confidence threshold"),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ) -> PropBoardResponse:
     return signal_service.get_prop_board(
@@ -26,6 +29,8 @@ def get_prop_board(
         stat_type=stat_type,
         recommended_only=recommended_only,
         min_confidence=min_confidence,
+        limit=limit,
+        offset=offset,
     )
 
 

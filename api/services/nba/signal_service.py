@@ -14,6 +14,8 @@ def get_prop_board(
     stat_type: str | None = None,
     recommended_only: bool = False,
     min_confidence: float | None = None,
+    limit: int = 50,
+    offset: int = 0,
 ) -> PropBoardResponse:
     return stats_signal_service.get_prop_board_response(
         db,
@@ -21,6 +23,8 @@ def get_prop_board(
         stat_type=stat_type,
         recommended_only=recommended_only,
         min_confidence=min_confidence,
+        limit=limit,
+        offset=offset,
     )
 
 
