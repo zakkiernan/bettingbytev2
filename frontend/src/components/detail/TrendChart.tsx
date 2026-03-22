@@ -63,8 +63,8 @@ export function TrendChart({ values, line, statLabel = "Value" }: Props) {
               borderRadius: "0.75rem",
               fontSize: "0.75rem",
             }}
-            formatter={(v: any) => [Number(v).toFixed(1), statLabel]}
-            labelFormatter={(l: any) => `Game ${l}`}
+            formatter={(value: unknown) => [Number(value ?? 0).toFixed(1), statLabel]}
+            labelFormatter={(label: unknown) => `Game ${String(label ?? "--")}`}
           />
           <Area
             type="monotone"

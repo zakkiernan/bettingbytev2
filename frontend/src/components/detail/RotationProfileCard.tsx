@@ -73,8 +73,8 @@ export function RotationProfileCard({ rotation }: Props) {
                   borderRadius: "0.75rem",
                   fontSize: "0.75rem",
                 }}
-                formatter={(v: any) => [`${v} min`, "Minutes"]}
-                labelFormatter={(l: any) => `Game ${l}`}
+                formatter={(value: unknown) => [`${String(value ?? "--")} min`, "Minutes"]}
+                labelFormatter={(label: unknown) => `Game ${String(label ?? "--")}`}
               />
               <Bar dataKey="minutes" fill="var(--color-accent)" radius={[3, 3, 0, 0]} />
             </BarChart>

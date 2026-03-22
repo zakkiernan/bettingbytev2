@@ -88,7 +88,7 @@ export function AdvancedTrendsChart({ trends }: Props) {
                 borderRadius: "0.75rem",
                 fontSize: "0.75rem",
               }}
-              labelFormatter={(l: any) => `Game ${l}`}
+              labelFormatter={(label: unknown) => `Game ${String(label ?? "--")}`}
             />
             {metrics
               .filter((m) => activeMetrics.has(m.key))

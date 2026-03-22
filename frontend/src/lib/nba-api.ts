@@ -71,7 +71,7 @@ export async function fetchRecentBoard(): Promise<{
 }> {
   const emptyBoard: PropBoardResponse = {
     props: [],
-    meta: { total_count: 0, game_count: 0, updated_at: undefined, stat_types_available: [] },
+    meta: { total_count: 0, game_count: 0, updated_at: undefined, stat_types_available: [], limit: 50, offset: 0, returned_count: 0 },
   };
 
   const todayBoard = await fetchBoard().catch(() => emptyBoard);
@@ -85,9 +85,9 @@ export async function fetchRecentBoard(): Promise<{
     .filter((g) => g.edge_count > 0)
     .sort((a, b) => b.edge_count - a.edge_count);
 
-  if (gamesWithEdges.length > 0) {
-    // Fetch board for the top game by edges
-    const fallback = await fetchBoard({ game_id: gamesWithEdges[0].game_id }).catch(() => emptyBoard);
+  const fallbackGame = gamesWithEdges[0];
+  if (fallbackGame) {
+    const fallback = await fetchBoard({ game_id: fallbackGame.game_id }).catch(() => emptyBoard);
     if (fallback.props.length > 0) {
       return { board: fallback, label: "Tonight" };
     }

@@ -6,14 +6,16 @@ interface Props {
   highlightStat?: string;
 }
 
+const defaultStatAccessor = (row: GameLogEntry) => row.points;
+
 const statAccessor: Record<string, (row: GameLogEntry) => number> = {
-  points: (r) => r.points,
-  rebounds: (r) => r.rebounds,
-  assists: (r) => r.assists,
-  steals: (r) => r.steals,
-  blocks: (r) => r.blocks,
-  threes_made: (r) => r.threes_made,
-  threes: (r) => r.threes_made,
+  points: defaultStatAccessor,
+  rebounds: (row) => row.rebounds,
+  assists: (row) => row.assists,
+  steals: (row) => row.steals,
+  blocks: (row) => row.blocks,
+  threes_made: (row) => row.threes_made,
+  threes: (row) => row.threes_made,
 };
 
 export function GameLogTable({ log, line, highlightStat = "points" }: Props) {
@@ -25,11 +27,10 @@ export function GameLogTable({ log, line, highlightStat = "points" }: Props) {
     );
   }
 
-  const accessor = statAccessor[highlightStat] ?? statAccessor.points;
+  const accessor = statAccessor[highlightStat] ?? defaultStatAccessor;
   const showThrees = highlightStat === "threes_made" || highlightStat === "threes";
 
-  const hits =
-    line != null ? log.filter((row) => accessor(row) > line).length : null;
+  const hits = line != null ? log.filter((row) => accessor(row) > line).length : null;
 
   return (
     <div className="overflow-x-auto">
@@ -42,9 +43,7 @@ export function GameLogTable({ log, line, highlightStat = "points" }: Props) {
             <th className={`pb-2 pr-4 text-right ${highlightStat === "points" ? "font-bold" : ""}`}>PTS</th>
             <th className={`pb-2 pr-4 text-right ${highlightStat === "rebounds" ? "font-bold" : ""}`}>REB</th>
             <th className={`pb-2 pr-4 text-right ${highlightStat === "assists" ? "font-bold" : ""}`}>AST</th>
-            {showThrees && (
-              <th className="pb-2 pr-4 text-right font-bold">3PM</th>
-            )}
+            {showThrees && <th className="pb-2 pr-4 text-right font-bold">3PM</th>}
             <th className="pb-2 text-right">+/-</th>
           </tr>
         </thead>
@@ -55,7 +54,7 @@ export function GameLogTable({ log, line, highlightStat = "points" }: Props) {
                   month: "numeric",
                   day: "numeric",
                 })
-              : "—";
+              : "--";
             const highlighted = accessor(row);
             const hitLine = line != null ? highlighted > line : null;
 
@@ -119,7 +118,7 @@ export function GameLogTable({ log, line, highlightStat = "points" }: Props) {
       </table>
       {line != null && (
         <p className="mt-2 text-xs text-[color:var(--color-text-muted)]">
-          {highlightStat.toUpperCase()} colored green/red vs tonight's line of {line}. Last {log.length}: {hits}/{log.length} overs.
+          {highlightStat.toUpperCase()} colored green/red vs tonight&apos;s line of {line}. Last {log.length}: {hits}/{log.length} overs.
         </p>
       )}
     </div>
@@ -152,7 +151,7 @@ function StatCell({
       </span>
       {isHighlighted && line != null && (
         <span className="ml-1 text-xs text-[color:var(--color-text-muted)]">
-          {hitLine ? "✓" : "✗"}
+          {hitLine ? "hit" : "miss"}
         </span>
       )}
     </td>

@@ -47,6 +47,9 @@ export interface PropBoardMeta {
   game_count: number;
   updated_at?: string;
   stat_types_available: string[];
+  limit: number;
+  offset: number;
+  returned_count: number;
 }
 
 export interface PropBoardResponse {
